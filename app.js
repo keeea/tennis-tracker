@@ -18,6 +18,8 @@ const OUTCOME_OPTIONS = [
 const SHOT_OPTIONS = ["forehand", "backhand", "volley", "overhead", "drop_shot"];
 const TABS = ["live", "history", "stats", "matches"];
 const STORAGE_KEY = "tennisTracker.activeMatchId";
+const MATCH_FORMAT = "best_of_2_super_tiebreak";
+const MATCH_FORMAT_LABEL = "Best of 2 sets + match tiebreak";
 
 const state = {
   matches: [],
@@ -108,7 +110,7 @@ function createMatchRecord({ playerA, playerB, initialServer }) {
     updatedAt: timestamp,
     date: timestamp,
     status: "in_progress",
-    format: "best_of_3",
+    format: MATCH_FORMAT,
     playerA: playerA.trim(),
     playerB: playerB.trim(),
     initialServer,
@@ -221,6 +223,22 @@ function isTiebreakWon(pointsA, pointsB) {
   return (pointsA >= 7 || pointsB >= 7) && Math.abs(pointsA - pointsB) >= 2;
 }
 
+function isSuperTiebreakWon(pointsA, pointsB) {
+  return (pointsA >= 10 || pointsB >= 10) && Math.abs(pointsA - pointsB) >= 2;
+}
+
+function isMatchTiebreakSet(setIndex, setsWon) {
+  return setIndex === 2 && setsWon[0] === 1 && setsWon[1] === 1;
+}
+
+function getSetLabel(setEntry) {
+  return setEntry.isMatchTiebreak ? "Match Tiebreak" : `Set ${setEntry.index + 1}`;
+}
+
+function getSetDisplayScore(setEntry) {
+  return setEntry.isMatchTiebreak ? (setEntry.tiebreakScore || setEntry.score || [0, 0]) : setEntry.score;
+}
+
 function sanitizePlayerIndexes(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -312,16 +330,19 @@ function computeMatch(match) {
   const rawPoints = Array.isArray(match.points) ? match.points : [];
   let setsWon = [0, 0];
   let currentSet = createSetContainer(0);
+  currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
   let currentGame = null;
   let nextGameServer = Number.isInteger(match.initialServer) ? match.initialServer : 0;
   let matchWinner = null;
 
   function startGame() {
+    const isMatchTiebreak = currentSet.isMatchTiebreak;
     currentGame = {
       index: currentSet.games.length,
       setIndex: currentSet.index,
       server: nextGameServer,
-      isTiebreak: currentSet.gamesWon[0] === 6 && currentSet.gamesWon[1] === 6,
+      isTiebreak: isMatchTiebreak || (currentSet.gamesWon[0] === 6 && currentSet.gamesWon[1] === 6),
+      isSuperTiebreak: isMatchTiebreak,
       pointsWon: [0, 0],
       points: [],
       scoreBefore: [...currentSet.gamesWon],
@@ -337,7 +358,11 @@ function computeMatch(match) {
     currentGame.scoreAfter = [...currentSet.gamesWon];
 
     const [gamesA, gamesB] = currentSet.gamesWon;
-    const tiebreakWon = currentGame.isTiebreak && isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1]);
+    const tiebreakWon = currentGame.isTiebreak && (
+      currentGame.isSuperTiebreak
+        ? isSuperTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+        : isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+    );
     const standardSetWon =
       (gamesA >= 6 || gamesB >= 6) &&
       Math.abs(gamesA - gamesB) >= 2 &&
@@ -353,7 +378,7 @@ function computeMatch(match) {
 
     if (setWon) {
       currentSet.winner = winner;
-      currentSet.score = [...currentSet.gamesWon];
+      currentSet.score = currentGame.isSuperTiebreak ? [...currentGame.pointsWon] : [...currentSet.gamesWon];
       setsWon[winner] += 1;
       sets.push(currentSet);
       currentGame = null;
@@ -362,6 +387,7 @@ function computeMatch(match) {
         matchWinner = winner;
       } else {
         currentSet = createSetContainer(currentSet.index + 1);
+        currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
       }
     } else {
       currentGame = null;
@@ -458,7 +484,9 @@ function computeMatch(match) {
 
     currentGame.pointsWon[winner] += 1;
     const wonGame = currentGame.isTiebreak
-      ? isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+      ? currentGame.isSuperTiebreak
+        ? isSuperTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+        : isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
       : isGameWon(currentGame.pointsWon[0], currentGame.pointsWon[1]);
     const scoreAfterGamePoint = currentGame.isTiebreak
       ? [...currentGame.pointsWon]
@@ -499,10 +527,21 @@ function computeMatch(match) {
   });
 
   if (currentSet.games.length && !sets.find((set) => set.index === currentSet.index)) {
-    currentSet.score = [...currentSet.gamesWon];
+    currentSet.score = currentSet.isMatchTiebreak && currentGame ? [...currentGame.pointsWon] : [...currentSet.gamesWon];
     sets.push(currentSet);
   }
 
+  const liveSetIsMatchTiebreak = currentSet.isMatchTiebreak;
+  const liveSetDisplay = liveSetIsMatchTiebreak && currentGame ? [...currentGame.pointsWon] : [...currentSet.gamesWon];
+  const liveGameType = currentGame
+    ? currentGame.isSuperTiebreak
+      ? "super_tiebreak"
+      : currentGame.isTiebreak
+        ? "tiebreak"
+        : "standard"
+    : liveSetIsMatchTiebreak
+      ? "super_tiebreak"
+      : "standard";
   const isComplete = matchWinner !== null;
   return {
     sets,
@@ -518,8 +557,11 @@ function computeMatch(match) {
         : currentGame.server
       : nextGameServer,
     liveSetGames: currentSet.gamesWon,
+    liveSetDisplay,
+    liveSetIsMatchTiebreak,
     liveGamePoints: currentGame ? currentGame.pointsWon : [0, 0],
     liveGameIsTiebreak: Boolean(currentGame?.isTiebreak),
+    liveGameType,
     liveScoreDisplay: currentGame
       ? currentGame.isTiebreak
         ? currentGame.pointsWon.map(String)
@@ -539,6 +581,7 @@ function createSetContainer(index) {
     score: [0, 0],
     winner: null,
     tiebreakScore: null,
+    isMatchTiebreak: false,
   };
 }
 
@@ -635,10 +678,12 @@ function encodeDataForExport(match) {
       score: set.score,
       winner: set.winner === null ? null : playerName(match, set.winner),
       tiebreakScore: set.tiebreakScore,
+      isMatchTiebreak: set.isMatchTiebreak,
       games: set.games.map((game) => ({
         index: game.index + 1,
         server: playerName(match, game.server),
         isTiebreak: game.isTiebreak,
+        isSuperTiebreak: Boolean(game.isSuperTiebreak),
         scoreBefore: game.scoreBefore,
         scoreAfter: game.scoreAfter,
         winner: playerName(match, game.winner),
@@ -777,7 +822,7 @@ function createImportedMatch({ playerA, playerB, initialServer, points }) {
     importedAt: timestamp,
     date: timestamp,
     status: "in_progress",
-    format: "best_of_3",
+    format: MATCH_FORMAT,
     playerA: playerA.trim(),
     playerB: playerB.trim(),
     initialServer,
@@ -1569,13 +1614,15 @@ function renderLive(view) {
   const setCards = [0, 1, 2]
     .map((setIndex) => {
       const set = computed.sets.find((entry) => entry.index === setIndex);
-      const games = set ? set.score : setIndex === computed.liveSetIndex ? computed.liveSetGames : [0, 0];
+      const isLiveSet = setIndex === computed.liveSetIndex;
+      const isMatchTiebreak = set?.isMatchTiebreak || (isLiveSet && computed.liveSetIsMatchTiebreak);
+      const score = set ? getSetDisplayScore(set) : isLiveSet ? computed.liveSetDisplay : [0, 0];
       return `
         <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
-          <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Set ${setIndex + 1}</p>
+          <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">${isMatchTiebreak ? "Match Tiebreak" : `Set ${setIndex + 1}`}</p>
           <div class="mt-3 grid grid-cols-2 gap-2 text-center font-mono text-2xl text-white">
-            <span>${games[0]}</span>
-            <span>${games[1]}</span>
+            <span>${score[0]}</span>
+            <span>${score[1]}</span>
           </div>
         </div>
       `;
@@ -1601,7 +1648,7 @@ function renderLive(view) {
             <div>
               <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
               <h2 class="mt-2 text-2xl font-bold text-white">${escapeHtml(match.playerA)} <span class="text-court-300/60">vs</span> ${escapeHtml(match.playerB)}</h2>
-              <p class="mt-2 text-sm text-court-200/65">${formatDate(match.date)} · Best of 3 sets</p>
+              <p class="mt-2 text-sm text-court-200/65">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right">
               <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Server</p>
@@ -1624,11 +1671,20 @@ function renderLive(view) {
                     <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[1]}</p>
                   </div>
                 </div>
-                <p class="mt-4 text-center text-sm text-court-200/65">${computed.liveGameIsTiebreak ? "Tiebreak in progress" : "Current game score"}</p>
+                <p class="mt-4 text-center text-sm text-court-200/65">${
+                  computed.liveGameType === "super_tiebreak"
+                    ? "Super Tiebreak in progress"
+                    : computed.liveGameType === "tiebreak"
+                      ? "Tiebreak in progress"
+                      : "Current game score"
+                }</p>
               </div>
-              <div class="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
-                ${renderMetric("Sets Won", `${computed.setsWon[0]} - ${computed.setsWon[1]}`)}
-                ${renderMetric("Games In Set", `${computed.liveSetGames[0]} - ${computed.liveSetGames[1]}`, `Set ${computed.liveSetIndex + 1}`)}
+              <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                ${renderMetric(
+                  computed.liveSetIsMatchTiebreak ? "Match Tiebreak" : "Games In Set",
+                  `${computed.liveSetDisplay[0]} - ${computed.liveSetDisplay[1]}`,
+                  computed.liveSetIsMatchTiebreak ? "First to 10, win by 2" : `Set ${computed.liveSetIndex + 1}`
+                )}
                 ${renderMetric("Points Logged", String(computed.totalPoints))}
               </div>
             </div>
@@ -1671,7 +1727,7 @@ function renderHistory(view) {
               .map(
                 (setEntry) => `
                 <div>
-                  <p class="mb-2 text-sm font-semibold text-white">Set ${setEntry.index + 1} · ${setEntry.score[0]}-${setEntry.score[1]}${setEntry.tiebreakScore ? ` TB ${setEntry.tiebreakScore[0]}-${setEntry.tiebreakScore[1]}` : ""}</p>
+                  <p class="mb-2 text-sm font-semibold text-white">${getSetLabel(setEntry)} · ${getSetDisplayScore(setEntry)[0]}-${getSetDisplayScore(setEntry)[1]}${setEntry.tiebreakScore && !setEntry.isMatchTiebreak ? ` TB ${setEntry.tiebreakScore[0]}-${setEntry.tiebreakScore[1]}` : ""}</p>
                   <div class="space-y-2">
                     ${
                       setEntry.games.length
@@ -1682,7 +1738,7 @@ function renderHistory(view) {
                                 <button data-action="history-game" data-set="${setEntry.index}" data-game="${gameEntry.index}" class="flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left text-sm ${
                                   active ? "border-court-300 bg-court-300/10 text-white" : "border-white/10 bg-white/5 text-court-100"
                                 }">
-                                  <span>Game ${gameEntry.index + 1}${gameEntry.isTiebreak ? " · TB" : ""}</span>
+                                  <span>${gameEntry.isSuperTiebreak ? "Match Tiebreak" : `Game ${gameEntry.index + 1}${gameEntry.isTiebreak ? " · TB" : ""}`}</span>
                                   <span>${playerName(match, gameEntry.server)} serves</span>
                                 </button>
                               `;
@@ -1702,9 +1758,9 @@ function renderHistory(view) {
         <div class="flex items-center justify-between gap-4">
           <div>
             <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Point History</p>
-            <h3 class="mt-2 text-xl font-semibold text-white">${set ? `Set ${set.index + 1}` : "Set 1"}${game ? ` · Game ${game.index + 1}` : ""}</h3>
+            <h3 class="mt-2 text-xl font-semibold text-white">${set ? getSetLabel(set) : "Set 1"}${game ? ` · ${game.isSuperTiebreak ? "Match Tiebreak" : `Game ${game.index + 1}`}` : ""}</h3>
           </div>
-          ${game ? `<span class="rounded-full bg-white/5 px-4 py-2 text-sm text-court-200/70">${game.isTiebreak ? "Tiebreak" : "Standard game"}</span>` : ""}
+          ${game ? `<span class="rounded-full bg-white/5 px-4 py-2 text-sm text-court-200/70">${game.isSuperTiebreak ? "Super Tiebreak" : game.isTiebreak ? "Tiebreak" : "Standard game"}</span>` : ""}
         </div>
         <div class="mt-5 space-y-3">
           ${
