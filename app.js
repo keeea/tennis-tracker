@@ -38,10 +38,14 @@ const state = {
     draft: createEmptyDraft(),
   },
   exportMessage: "",
+  notice: "",
+  noticeType: "success",
   error: "",
   shareSupported: Boolean(navigator.share),
   loading: true,
 };
+
+let noticeTimeoutId = 0;
 
 function createEmptyDraft() {
   return {
@@ -110,6 +114,27 @@ function createMatchRecord({ playerA, playerB, initialServer }) {
     initialServer,
     points: [],
   };
+}
+
+function setNotice(message, type = "success") {
+  state.notice = message;
+  state.noticeType = type;
+  if (noticeTimeoutId) {
+    window.clearTimeout(noticeTimeoutId);
+  }
+  noticeTimeoutId = window.setTimeout(() => {
+    state.notice = "";
+    noticeTimeoutId = 0;
+    render();
+  }, 3000);
+}
+
+function clearNotice() {
+  state.notice = "";
+  if (noticeTimeoutId) {
+    window.clearTimeout(noticeTimeoutId);
+    noticeTimeoutId = 0;
+  }
 }
 
 function playerName(match, index) {
@@ -707,6 +732,345 @@ function downloadFile(filename, content, type) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function validateImportedPoint(point) {
+  if (!point || typeof point !== "object") {
+    throw new Error("Invalid point record.");
+  }
+  if (typeof point.id !== "string" || !point.id) {
+    throw new Error("Imported point is missing an id.");
+  }
+  if (!SERVE_OPTIONS.some((option) => option.value === point.serveResult)) {
+    throw new Error("Imported point has an invalid serve result.");
+  }
+  const winner = Number(point.winner);
+  if (winner !== 0 && winner !== 1) {
+    throw new Error("Imported point has an invalid winner.");
+  }
+  if (point.outcome !== "" && !OUTCOME_OPTIONS.some((option) => option.value === point.outcome)) {
+    throw new Error("Imported point has an invalid outcome.");
+  }
+  if (point.shotType !== "" && point.shotType !== undefined && !SHOT_OPTIONS.includes(point.shotType)) {
+    throw new Error("Imported point has an invalid shot type.");
+  }
+  return {
+    id: crypto.randomUUID(),
+    serveResult: point.serveResult,
+    outcome: point.outcome || "",
+    shotType: normalizeShotType(point.shotType),
+    winner,
+    netApproach: Boolean(point.netApproach),
+    netApproachPlayers: sanitizePlayerIndexes(point.netApproachPlayers),
+    returnWinner: Boolean(point.returnWinner),
+    returnWinnerPlayers: sanitizePlayerIndexes(point.returnWinnerPlayers),
+    timestamp: typeof point.timestamp === "string" && point.timestamp ? point.timestamp : new Date().toISOString(),
+  };
+}
+
+function createImportedMatch({ playerA, playerB, initialServer, points }) {
+  const timestamp = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    importedAt: timestamp,
+    date: timestamp,
+    status: "in_progress",
+    format: "best_of_3",
+    playerA: playerA.trim(),
+    playerB: playerB.trim(),
+    initialServer,
+    points,
+  };
+}
+
+function validateImportedMatchShape(match) {
+  if (!match || typeof match !== "object") {
+    throw new Error("Invalid match payload.");
+  }
+  if (typeof match.id !== "string" || !match.id) {
+    throw new Error("Imported match is missing an id.");
+  }
+  if (typeof match.playerA !== "string" || !match.playerA.trim() || typeof match.playerB !== "string" || !match.playerB.trim()) {
+    throw new Error("Imported match must include both player names.");
+  }
+  if (!Array.isArray(match.points)) {
+    throw new Error("Imported match is missing a points array.");
+  }
+}
+
+function parsePlayerList(value, nameToIndex) {
+  if (!value.trim()) {
+    return [];
+  }
+  return [...new Set(
+    value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((name) => {
+        if (!nameToIndex.has(name)) {
+          throw new Error(`Unknown player "${name}" in CSV import.`);
+        }
+        return nameToIndex.get(name);
+      })
+  )];
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let cell = "";
+  let row = [];
+  let inQuotes = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        cell += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (char === "," && !inQuotes) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") {
+        index += 1;
+      }
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows.filter((entry) => entry.some((value) => value !== ""));
+}
+
+function importMatchFromJson(text) {
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error("Invalid JSON file.");
+  }
+
+  if (!payload || typeof payload !== "object" || !payload.match || !Array.isArray(payload.sets)) {
+    throw new Error("JSON does not match the exported match format.");
+  }
+  if (typeof payload.match.id !== "string" || !payload.match.id) {
+    throw new Error("JSON export is missing the original match id.");
+  }
+
+  const playerA = String(payload.match.playerA || "").trim();
+  const playerB = String(payload.match.playerB || "").trim();
+  if (!playerA || !playerB) {
+    throw new Error("JSON export is missing player names.");
+  }
+
+  const playerLookup = new Map([
+    [playerA, 0],
+    [playerB, 1],
+  ]);
+  const initialServerName = payload.match.initialServer;
+  if (!playerLookup.has(initialServerName)) {
+    throw new Error("JSON export has an invalid initial server.");
+  }
+
+  const points = [];
+  payload.sets.forEach((set, setIndex) => {
+    if (!set || typeof set !== "object" || !Array.isArray(set.games)) {
+      throw new Error(`JSON export is missing games for set ${setIndex + 1}.`);
+    }
+    set.games.forEach((game, gameIndex) => {
+      if (!game || typeof game !== "object" || !Array.isArray(game.points)) {
+        throw new Error(`JSON export is missing points for set ${setIndex + 1}, game ${gameIndex + 1}.`);
+      }
+      game.points.forEach((point) => {
+        if (!playerLookup.has(point.winner)) {
+          throw new Error("JSON export contains an unknown point winner.");
+        }
+        points.push(validateImportedPoint({
+          id: point.id || crypto.randomUUID(),
+          serveResult: point.serveResult,
+          outcome: point.outcome || "",
+          shotType: point.shotType || "",
+          winner: playerLookup.get(point.winner),
+          netApproach: point.netApproach,
+          netApproachPlayers: Array.isArray(point.netApproachPlayers)
+            ? point.netApproachPlayers.map((name) => {
+              if (!playerLookup.has(name)) {
+                throw new Error(`Unknown net approach player "${name}" in JSON import.`);
+              }
+              return playerLookup.get(name);
+            })
+            : [],
+          returnWinner: point.returnWinner,
+          returnWinnerPlayers: Array.isArray(point.returnWinnerPlayers)
+            ? point.returnWinnerPlayers.map((name) => {
+              if (!playerLookup.has(name)) {
+                throw new Error(`Unknown return winner player "${name}" in JSON import.`);
+              }
+              return playerLookup.get(name);
+            })
+            : [],
+        }));
+      });
+    });
+  });
+
+  const importedMatch = createImportedMatch({
+    playerA,
+    playerB,
+    initialServer: playerLookup.get(initialServerName),
+    points,
+  });
+  validateImportedMatchShape(importedMatch);
+  return importedMatch;
+}
+
+function importMatchFromCsv(text) {
+  const rows = parseCsv(text);
+  if (!rows.length) {
+    throw new Error("CSV file is empty.");
+  }
+
+  const headers = rows[0];
+  const expectedHeaders = [
+    "set",
+    "game",
+    "point",
+    "tiebreak",
+    "server",
+    "receiver",
+    "winner",
+    "serve_result",
+    "outcome",
+    "shot_type",
+    "score_before",
+    "score_after",
+    "break_point",
+    "net_approach",
+    "net_players",
+    "return_winner",
+    "return_winner_players",
+  ];
+  if (headers.length !== expectedHeaders.length || headers.some((header, index) => header !== expectedHeaders[index])) {
+    throw new Error("CSV does not match the exported match format.");
+  }
+  if (rows.length < 2) {
+    throw new Error("CSV export has no point rows to import.");
+  }
+
+  const records = rows.slice(1).map((row) => {
+    if (row.length !== headers.length) {
+      throw new Error("CSV row has an unexpected number of columns.");
+    }
+    return Object.fromEntries(headers.map((header, index) => [header, row[index]]));
+  });
+
+  const firstRecord = records[0];
+  const playerA = firstRecord.server?.trim();
+  const playerB = firstRecord.receiver?.trim();
+  if (!playerA || !playerB || playerA === playerB) {
+    throw new Error("CSV export does not contain valid player names.");
+  }
+
+  const playerLookup = new Map([
+    [playerA, 0],
+    [playerB, 1],
+  ]);
+  records.forEach((record) => {
+    ["server", "receiver", "winner"].forEach((field) => {
+      const name = record[field]?.trim();
+      if (!playerLookup.has(name)) {
+        throw new Error(`Unknown player "${name}" in CSV import.`);
+      }
+    });
+  });
+
+  const points = records
+    .sort((a, b) =>
+      Number(a.set) - Number(b.set) ||
+      Number(a.game) - Number(b.game) ||
+      Number(a.point) - Number(b.point)
+    )
+    .map((record) => validateImportedPoint({
+      id: crypto.randomUUID(),
+      serveResult: record.serve_result,
+      outcome: record.outcome,
+      shotType: record.shot_type,
+      winner: playerLookup.get(record.winner.trim()),
+      netApproach: record.net_approach === "yes",
+      netApproachPlayers: parsePlayerList(record.net_players, playerLookup),
+      returnWinner: record.return_winner === "yes",
+      returnWinnerPlayers: parsePlayerList(record.return_winner_players, playerLookup),
+    }));
+
+  const importedMatch = createImportedMatch({
+    playerA,
+    playerB,
+    initialServer: playerLookup.get(firstRecord.server.trim()),
+    points,
+  });
+  validateImportedMatchShape(importedMatch);
+  return importedMatch;
+}
+
+async function finalizeImportedMatch(match) {
+  await saveMatch(match);
+  state.currentMatchId = match.id;
+  localStorage.setItem(STORAGE_KEY, match.id);
+  state.currentTab = "live";
+  state.error = "";
+  state.exportMessage = "";
+  resetDrafts();
+  setNotice("Match imported successfully", "success");
+  render();
+}
+
+function openImportPicker() {
+  const input = document.querySelector("#match-import-input");
+  if (!input) {
+    return;
+  }
+  input.value = "";
+  input.click();
+}
+
+async function importMatchFile(file) {
+  if (!file) {
+    return;
+  }
+  const name = file.name.toLowerCase();
+  const text = await file.text();
+  const importedMatch = name.endsWith(".json")
+    ? importMatchFromJson(text)
+    : name.endsWith(".csv")
+      ? importMatchFromCsv(text)
+      : null;
+
+  if (!importedMatch) {
+    throw new Error("Choose a JSON or CSV export file.");
+  }
+
+  await finalizeImportedMatch(importedMatch);
 }
 
 async function exportMatch(kind) {
@@ -1468,7 +1832,10 @@ function renderMatches() {
           <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Saved Matches</p>
           <p class="mt-2 text-sm text-court-200/65">Every match lives locally in IndexedDB.</p>
         </div>
-        <button data-action="new-match" class="rounded-2xl bg-court-300 px-4 py-3 text-sm font-semibold text-court-950">New Match</button>
+        <div class="flex items-center gap-2">
+          <button data-action="import-match" class="rounded-2xl border border-court-300/35 bg-transparent px-4 py-3 text-sm font-medium text-court-200 transition hover:border-court-300/60 hover:bg-white/5">Import Match</button>
+          <button data-action="new-match" class="rounded-2xl bg-court-300 px-4 py-3 text-sm font-semibold text-court-950">New Match</button>
+        </div>
       </div>
       <div class="mt-5 space-y-3">
         ${
@@ -1563,6 +1930,8 @@ function render() {
             }).join("")}
           </nav>
         </header>
+        <input id="match-import-input" type="file" accept=".json,.csv,application/json,text/csv" class="hidden" />
+        ${state.notice ? `<div class="mb-4 rounded-2xl border px-4 py-3 text-sm ${state.noticeType === "error" ? "border-red-400/30 bg-red-400/10 text-red-200" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"}">${escapeHtml(state.notice)}</div>` : ""}
         ${state.error ? `<div class="mb-4 rounded-2xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-200">${escapeHtml(state.error)}</div>` : ""}
         ${
           state.currentTab === "live"
@@ -1688,6 +2057,10 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (action === "import-match") {
+    openImportPicker();
+    return;
+  }
   if (action === "delete-match") {
     if (window.confirm("Delete this match and all logged points?")) {
       await deleteMatch(target.dataset.id);
@@ -1707,6 +2080,26 @@ document.addEventListener("input", (event) => {
   const action = target.dataset.action;
   if (action === "setup-input") {
     state.setup[target.dataset.key] = target.value;
+  }
+});
+
+document.addEventListener("change", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.id !== "match-import-input") {
+    return;
+  }
+
+  clearNotice();
+  state.error = "";
+
+  try {
+    await importMatchFile(target.files?.[0] || null);
+  } catch (error) {
+    console.error(error);
+    setNotice(error instanceof Error ? error.message : "Unable to import this file.", "error");
+    render();
+  } finally {
+    target.value = "";
   }
 });
 
