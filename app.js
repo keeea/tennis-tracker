@@ -49,9 +49,13 @@ function createEmptyDraft() {
     outcome: "",
     shotType: "",
     winner: "",
-    netApproachPlayers: [],
-    returnWinnerPlayers: [],
+    netApproachStates: createEmptyFlagStates(),
+    returnWinnerStates: createEmptyFlagStates(),
   };
+}
+
+function createEmptyFlagStates() {
+  return { 0: "", 1: "" };
 }
 
 function createStatsBucket() {
@@ -130,9 +134,13 @@ function serveLabel(serveResult) {
 
 function formatPercent(numerator, denominator) {
   if (!denominator) {
-    return "0%";
+    return "-";
   }
   return `${Math.round((numerator / denominator) * 100)}%`;
+}
+
+function formatFraction(numerator, denominator) {
+  return `${numerator}/${denominator}`;
 }
 
 function formatDate(isoString) {
@@ -195,6 +203,42 @@ function sanitizePlayerIndexes(value) {
   return [...new Set(value.map((entry) => Number(entry)).filter((entry) => entry === 0 || entry === 1))];
 }
 
+function sanitizeFlagStates(value) {
+  const next = createEmptyFlagStates();
+  if (!value || typeof value !== "object") {
+    return next;
+  }
+  ["0", "1"].forEach((playerIndex) => {
+    if (value[playerIndex] === "yes" || value[playerIndex] === "no") {
+      next[playerIndex] = value[playerIndex];
+    }
+  });
+  return next;
+}
+
+function flagStatesToPlayers(flagStates) {
+  const sanitized = sanitizeFlagStates(flagStates);
+  return Object.entries(sanitized)
+    .filter(([, stateValue]) => stateValue === "yes")
+    .map(([playerIndex]) => Number(playerIndex));
+}
+
+function playersToFlagStates(players) {
+  const next = createEmptyFlagStates();
+  sanitizePlayerIndexes(players).forEach((playerIndex) => {
+    next[playerIndex] = "yes";
+  });
+  return next;
+}
+
+function normalizeWinner(value) {
+  return value === 0 || value === 1 ? value : null;
+}
+
+function normalizeShotType(value) {
+  return SHOT_OPTIONS.includes(value) ? value : "";
+}
+
 function resolveNetApproachPlayers(rawPoint, winner, loser, server, receiver) {
   const explicit = sanitizePlayerIndexes(rawPoint.netApproachPlayers);
   if (explicit.length) {
@@ -220,17 +264,7 @@ function resolveReturnWinnerPlayers(rawPoint, receiver) {
   if (explicit.length) {
     return explicit;
   }
-  return rawPoint.returnWinner ? [receiver] : [];
-}
-
-function togglePlayerSelection(selectedPlayers, playerIndex, enabled) {
-  const next = new Set(sanitizePlayerIndexes(selectedPlayers));
-  if (enabled) {
-    next.add(playerIndex);
-  } else {
-    next.delete(playerIndex);
-  }
-  return [...next].sort();
+  return rawPoint.returnWinner && rawPoint.outcome === "winner" ? [receiver] : [];
 }
 
 function formatPlayerList(match, playerIndexes) {
@@ -322,7 +356,10 @@ function computeMatch(match) {
       ? getTiebreakServer(currentGame.server, pointInGame)
       : currentGame.server;
     const receiver = 1 - server;
-    const winner = Number(rawPoint.winner);
+    const winner = normalizeWinner(Number(rawPoint.winner));
+    if (winner === null) {
+      return;
+    }
     const loser = 1 - winner;
     const isBreakChance = !currentGame.isTiebreak && isBreakPoint(currentGame.pointsWon, server);
     const scoreBeforeGamePoint = currentGame.isTiebreak
@@ -330,6 +367,7 @@ function computeMatch(match) {
       : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1]);
     const netApproachPlayers = resolveNetApproachPlayers(rawPoint, winner, loser, server, receiver);
     const returnWinnerPlayers = resolveReturnWinnerPlayers(rawPoint, receiver);
+    const shotType = normalizeShotType(rawPoint.shotType);
     const setBuckets = ensureSetBucket(statsBySet, currentSet.index);
 
     [statsOverall, setBuckets].forEach((bucketGroup) => {
@@ -364,12 +402,12 @@ function computeMatch(match) {
         bucketGroup[server].doubleFaults += 1;
       }
 
-      if (rawPoint.outcome === "winner" && rawPoint.shotType && bucketGroup[winner].winners[rawPoint.shotType] !== undefined) {
-        bucketGroup[winner].winners[rawPoint.shotType] += 1;
+      if (rawPoint.outcome === "winner" && shotType && bucketGroup[winner].winners[shotType] !== undefined) {
+        bucketGroup[winner].winners[shotType] += 1;
       }
 
-      if (rawPoint.outcome === "unforced_error" && rawPoint.shotType && bucketGroup[loser].unforcedErrors[rawPoint.shotType] !== undefined) {
-        bucketGroup[loser].unforcedErrors[rawPoint.shotType] += 1;
+      if (rawPoint.outcome === "unforced_error" && shotType && bucketGroup[loser].unforcedErrors[shotType] !== undefined) {
+        bucketGroup[loser].unforcedErrors[shotType] += 1;
       }
 
       if (rawPoint.outcome === "forced_error") {
@@ -588,7 +626,7 @@ function encodeDataForExport(match) {
           scoreAfter: point.scoreAfter,
           serveResult: point.serveResult,
           outcome: point.outcome,
-          shotType: point.shotType,
+          shotType: normalizeShotType(point.shotType),
           netApproach: point.netApproach,
           netApproachPlayers: point.netApproachPlayers.map((index) => playerName(match, index)),
           returnWinner: point.returnWinner,
@@ -639,13 +677,13 @@ function makeCsv(match) {
           playerName(match, point.winner),
           point.serveResult,
           point.outcome,
-          point.shotType,
+          normalizeShotType(point.shotType),
           Array.isArray(point.scoreBefore) ? point.scoreBefore.join("-") : point.scoreBefore,
           Array.isArray(point.scoreAfter) ? point.scoreAfter.join("-") : point.scoreAfter,
           point.isBreakPoint ? "yes" : "no",
           point.netApproachPlayers.length ? "yes" : "no",
           formatPlayerList(match, point.netApproachPlayers),
-          point.returnWinner ? "yes" : "no",
+          point.returnWinnerPlayers.length ? "yes" : "no",
           formatPlayerList(match, point.returnWinnerPlayers),
         ]);
       });
@@ -733,15 +771,15 @@ function validatePointDraft(draft, computed) {
     draft.winner = String(server);
     draft.outcome = "";
     draft.shotType = "";
-    draft.netApproachPlayers = [];
-    draft.returnWinnerPlayers = [];
+    draft.netApproachStates = createEmptyFlagStates();
+    draft.returnWinnerStates = createEmptyFlagStates();
   }
   if (draft.serveResult === "double_fault") {
     draft.winner = String(receiver);
     draft.outcome = "";
     draft.shotType = "";
-    draft.netApproachPlayers = [];
-    draft.returnWinnerPlayers = [];
+    draft.netApproachStates = createEmptyFlagStates();
+    draft.returnWinnerStates = createEmptyFlagStates();
   }
   if (draft.serveResult !== "ace" && draft.serveResult !== "double_fault") {
     if (!draft.outcome) {
@@ -751,7 +789,7 @@ function validatePointDraft(draft, computed) {
       return "Select who won the point.";
     }
   }
-  if (sanitizePlayerIndexes(draft.returnWinnerPlayers).length && draft.outcome !== "winner") {
+  if (flagStatesToPlayers(draft.returnWinnerStates).length && draft.outcome !== "winner") {
     return "Return winner only applies to winner outcomes.";
   }
   return "";
@@ -797,12 +835,12 @@ async function addPoint() {
     id: crypto.randomUUID(),
     serveResult: draft.serveResult,
     outcome: draft.outcome,
-    shotType: draft.shotType,
+    shotType: normalizeShotType(draft.shotType),
     winner: Number(draft.winner),
-    netApproach: sanitizePlayerIndexes(draft.netApproachPlayers).length > 0,
-    netApproachPlayers: sanitizePlayerIndexes(draft.netApproachPlayers),
-    returnWinner: sanitizePlayerIndexes(draft.returnWinnerPlayers).length > 0,
-    returnWinnerPlayers: sanitizePlayerIndexes(draft.returnWinnerPlayers),
+    netApproach: flagStatesToPlayers(draft.netApproachStates).length > 0,
+    netApproachPlayers: flagStatesToPlayers(draft.netApproachStates),
+    returnWinner: flagStatesToPlayers(draft.returnWinnerStates).length > 0,
+    returnWinnerPlayers: flagStatesToPlayers(draft.returnWinnerStates),
     timestamp: new Date().toISOString(),
   });
   await saveMatch(view.match);
@@ -844,14 +882,14 @@ async function savePointEdit() {
     draft.winner = String(server);
     draft.outcome = "";
     draft.shotType = "";
-    draft.netApproachPlayers = [];
-    draft.returnWinnerPlayers = [];
+    draft.netApproachStates = createEmptyFlagStates();
+    draft.returnWinnerStates = createEmptyFlagStates();
   } else if (draft.serveResult === "double_fault") {
     draft.winner = String(receiver);
     draft.outcome = "";
     draft.shotType = "";
-    draft.netApproachPlayers = [];
-    draft.returnWinnerPlayers = [];
+    draft.netApproachStates = createEmptyFlagStates();
+    draft.returnWinnerStates = createEmptyFlagStates();
   } else {
     if (!draft.outcome || draft.winner === "") {
       state.error = "Complete all required point fields.";
@@ -859,7 +897,7 @@ async function savePointEdit() {
       return;
     }
   }
-  if (sanitizePlayerIndexes(draft.returnWinnerPlayers).length && draft.outcome !== "winner") {
+  if (flagStatesToPlayers(draft.returnWinnerStates).length && draft.outcome !== "winner") {
     state.error = "Return winner only applies to winner outcomes.";
     render();
     return;
@@ -869,12 +907,12 @@ async function savePointEdit() {
     ...original,
     serveResult: draft.serveResult,
     outcome: draft.outcome,
-    shotType: draft.shotType,
+    shotType: normalizeShotType(draft.shotType),
     winner: Number(draft.winner),
-    netApproach: sanitizePlayerIndexes(draft.netApproachPlayers).length > 0,
-    netApproachPlayers: sanitizePlayerIndexes(draft.netApproachPlayers),
-    returnWinner: sanitizePlayerIndexes(draft.returnWinnerPlayers).length > 0,
-    returnWinnerPlayers: sanitizePlayerIndexes(draft.returnWinnerPlayers),
+    netApproach: flagStatesToPlayers(draft.netApproachStates).length > 0,
+    netApproachPlayers: flagStatesToPlayers(draft.netApproachStates),
+    returnWinner: flagStatesToPlayers(draft.returnWinnerStates).length > 0,
+    returnWinnerPlayers: flagStatesToPlayers(draft.returnWinnerStates),
   };
   await saveMatch(view.match);
   resetDrafts();
@@ -911,10 +949,10 @@ function openEditor(pointId) {
   state.editor.draft = {
     serveResult: point.serveResult,
     outcome: point.outcome,
-    shotType: point.shotType === "serve" ? "" : point.shotType,
+    shotType: point.shotType === "serve" ? "" : normalizeShotType(point.shotType),
     winner: String(point.winner),
-    netApproachPlayers: [...derivedPoint.netApproachPlayers],
-    returnWinnerPlayers: [...derivedPoint.returnWinnerPlayers],
+    netApproachStates: playersToFlagStates(derivedPoint.netApproachPlayers),
+    returnWinnerStates: playersToFlagStates(derivedPoint.returnWinnerPlayers),
   };
   render();
 }
@@ -944,8 +982,8 @@ function setDraftValue(target, key, value) {
     if (value === "ace" || value === "double_fault") {
       state[target].outcome = "";
       state[target].shotType = "";
-      state[target].netApproachPlayers = [];
-      state[target].returnWinnerPlayers = [];
+      state[target].netApproachStates = createEmptyFlagStates();
+      state[target].returnWinnerStates = createEmptyFlagStates();
     }
   }
   render();
@@ -956,10 +994,17 @@ function updateEditorDraft(key, value) {
   if (key === "serveResult" && (value === "ace" || value === "double_fault")) {
     state.editor.draft.outcome = "";
     state.editor.draft.shotType = "";
-    state.editor.draft.netApproachPlayers = [];
-    state.editor.draft.returnWinnerPlayers = [];
+    state.editor.draft.netApproachStates = createEmptyFlagStates();
+    state.editor.draft.returnWinnerStates = createEmptyFlagStates();
   }
   render();
+}
+
+function updateFlagState(flagStates, playerIndex, value) {
+  const next = sanitizeFlagStates(flagStates);
+  const key = String(playerIndex);
+  next[key] = next[key] === value ? "" : value;
+  return next;
 }
 
 function renderMetric(title, value, detail = "") {
@@ -994,9 +1039,10 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
         ${!aceOrDf ? renderChoiceGrid("Shot Type (Optional)", [{ value: "", label: "None" }, ...SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) }))], draft.shotType, `${prefix}-shot`, "grid-cols-2") : ""}
         <div>
           <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Optional Flags</p>
+          <p class="mb-3 text-sm text-court-200/60">Leave both buttons unselected if the point should not record this flag.</p>
           <div class="space-y-4">
-            ${renderPlayerToggleSection(prefix, "netApproachPlayers", "Net Approach", match, draft.netApproachPlayers)}
-            ${renderPlayerToggleSection(prefix, "returnWinnerPlayers", "Return Winner", match, draft.returnWinnerPlayers)}
+            ${renderPlayerToggleSection(prefix, "netApproachStates", "Net Approach", match, draft.netApproachStates)}
+            ${renderPlayerToggleSection(prefix, "returnWinnerStates", "Return Winner", match, draft.returnWinnerStates)}
           </div>
         </div>
         <button data-action="${prefix}-save" class="w-full rounded-2xl bg-emerald-500 px-5 py-5 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400">
@@ -1035,14 +1081,15 @@ function renderChoiceGrid(label, options, selected, action, gridClass) {
   `;
 }
 
-function renderPlayerToggleSection(prefix, key, label, match, selectedPlayers) {
+function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
+  const states = sanitizeFlagStates(flagStates);
   return `
     <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4">
       <p class="text-sm font-semibold text-white">${label}</p>
       <div class="mt-4 space-y-3">
         ${[0, 1]
           .map((playerIndex) => {
-            const selected = sanitizePlayerIndexes(selectedPlayers).includes(playerIndex);
+            const selectedState = states[playerIndex] || "";
             return `
               <div class="flex items-center justify-between gap-3">
                 <p class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</p>
@@ -1051,9 +1098,9 @@ function renderPlayerToggleSection(prefix, key, label, match, selectedPlayers) {
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
-                    data-enabled="true"
+                    data-value="yes"
                     class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition ${
-                      selected
+                      selectedState === "yes"
                         ? "border-emerald-400 bg-emerald-500/15 text-emerald-300"
                         : "border-white/10 bg-court-950/40 text-court-100"
                     }"
@@ -1064,11 +1111,11 @@ function renderPlayerToggleSection(prefix, key, label, match, selectedPlayers) {
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
-                    data-enabled="false"
+                    data-value="no"
                     class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition ${
-                      selected
-                        ? "border-white/10 bg-court-950/40 text-court-100"
-                        : "border-red-400/40 bg-red-500/10 text-red-200"
+                      selectedState === "no"
+                        ? "border-red-400/40 bg-red-500/10 text-red-200"
+                        : "border-white/10 bg-court-950/40 text-court-100"
                     }"
                   >
                     No
@@ -1174,6 +1221,13 @@ function renderLive(view) {
   return `
     <section class="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
       <div class="space-y-5">
+        ${
+          computed.matchWinner === null
+            ? renderPointComposer(match, computed, state.draft, "draft")
+            : `<section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5 text-sm text-court-200/70">
+                Start a new match from the matches tab or export this result below.
+              </section>`
+        }
         <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur">
           <div class="flex items-start justify-between gap-4">
             <div>
@@ -1203,13 +1257,6 @@ function renderLive(view) {
             <p class="mt-4 text-center text-sm text-court-200/65">${computed.liveGameIsTiebreak ? "Tiebreak in progress" : "Current game score"}</p>
           </div>
         </section>
-        ${
-          computed.matchWinner === null
-            ? renderPointComposer(match, computed, state.draft, "draft")
-            : `<section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5 text-sm text-court-200/70">
-                Start a new match from the matches tab or export this result below.
-              </section>`
-        }
       </div>
       <div class="space-y-5">
         <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
@@ -1335,10 +1382,10 @@ function renderStatsTable(match, stats) {
     ["Unforced Errors", totalShotCount(stats[0].unforcedErrors), totalShotCount(stats[1].unforcedErrors)],
     ["UFE FH/BH", `${stats[0].unforcedErrors.forehand}/${stats[0].unforcedErrors.backhand}`, `${stats[1].unforcedErrors.forehand}/${stats[1].unforcedErrors.backhand}`],
     ["Forced Errors", stats[0].forcedErrors, stats[1].forcedErrors],
-    ["Net Points", `${stats[0].netPointsWon}/${stats[0].netPointsPlayed}`, `${stats[1].netPointsWon}/${stats[1].netPointsPlayed}`],
+    ["Net Points", formatFraction(stats[0].netPointsWon, stats[0].netPointsPlayed), formatFraction(stats[1].netPointsWon, stats[1].netPointsPlayed)],
     ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
-    ["Break Points", `${stats[0].breakPointsConverted}/${stats[0].breakPointsOpportunities}`, `${stats[1].breakPointsConverted}/${stats[1].breakPointsOpportunities}`],
-    ["Break Points Saved", `${stats[0].breakPointsSaved}/${stats[0].breakPointsFaced}`, `${stats[1].breakPointsSaved}/${stats[1].breakPointsFaced}`],
+    ["Break Points", formatFraction(stats[0].breakPointsConverted, stats[0].breakPointsOpportunities), formatFraction(stats[1].breakPointsConverted, stats[1].breakPointsOpportunities)],
+    ["Break Points Saved", formatFraction(stats[0].breakPointsSaved, stats[0].breakPointsFaced), formatFraction(stats[1].breakPointsSaved, stats[1].breakPointsFaced)],
     ["Total Points Won", stats[0].totalPointsWon, stats[1].totalPointsWon],
   ];
   return `
@@ -1370,7 +1417,8 @@ function shortShotLine(bucket) {
 }
 
 function pointDescription(point) {
-  return [serveLabel(point.serveResult), point.outcome ? outcomeLabel(point.outcome) : "", point.shotType ? shotLabel(point.shotType) : ""]
+  const shotType = normalizeShotType(point.shotType);
+  return [serveLabel(point.serveResult), point.outcome ? outcomeLabel(point.outcome) : "", shotType ? shotLabel(shotType) : ""]
     .filter(Boolean)
     .join(" · ");
 }
@@ -1578,10 +1626,10 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "draft-player-flag") {
-    state.draft[target.dataset.key] = togglePlayerSelection(
+    state.draft[target.dataset.key] = updateFlagState(
       state.draft[target.dataset.key],
       Number(target.dataset.player),
-      target.dataset.enabled === "true"
+      target.dataset.value
     );
     render();
     return;
@@ -1605,10 +1653,10 @@ document.addEventListener("click", async (event) => {
   if (action === "edit-player-flag") {
     updateEditorDraft(
       target.dataset.key,
-      togglePlayerSelection(
+      updateFlagState(
         state.editor.draft[target.dataset.key],
         Number(target.dataset.player),
-        target.dataset.enabled === "true"
+        target.dataset.value
       )
     );
     return;
