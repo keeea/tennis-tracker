@@ -1418,10 +1418,10 @@ function updateFlagState(flagStates, playerIndex, value) {
 
 function renderMetric(title, value, detail = "") {
   return `
-    <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+    <div class="rounded-2xl border border-white/10 bg-white/5 p-4 md:p-3">
       <p class="text-xs uppercase tracking-[0.24em] text-court-300/70">${title}</p>
-      <p class="mt-2 font-mono text-2xl text-white">${value}</p>
-      ${detail ? `<p class="mt-1 text-sm text-court-200/60">${detail}</p>` : ""}
+      <p class="mt-2 font-mono text-2xl text-white md:text-xl">${value}</p>
+      ${detail ? `<p class="mt-1 text-sm text-court-200/60 md:text-xs">${detail}</p>` : ""}
     </div>
   `;
 }
@@ -1434,27 +1434,27 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
   const aceOrDf = draft.serveResult === "ace" || draft.serveResult === "double_fault";
   const submitLabel = prefix === "edit" ? "Save Point Changes" : "Submit Point";
   return `
-    <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-4 shadow-panel backdrop-blur">
+    <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-4 shadow-panel backdrop-blur md:p-3.5">
       <div>
         <div>
           <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Point Entry</p>
-          <p class="mt-2 text-sm text-court-200/70">Server: <span class="font-semibold text-white">${serverName}</span> · Returner: <span class="font-semibold text-white">${receiverName}</span></p>
+          <p class="mt-2 text-sm text-court-200/70 md:text-xs">Server: <span class="font-semibold text-white">${serverName}</span> · Returner: <span class="font-semibold text-white">${receiverName}</span></p>
         </div>
       </div>
-      <div class="mt-5 space-y-5">
+      <div class="mt-5 space-y-5 md:mt-4 md:space-y-4">
         ${renderChoiceGrid("Serve Result", SERVE_OPTIONS, draft.serveResult, `${prefix}-serve`, "grid-cols-2")}
         ${!aceOrDf ? renderChoiceGrid("Who Won The Point", [{ value: "0", label: match.playerA }, { value: "1", label: match.playerB }], draft.winner, `${prefix}-winner`, "grid-cols-2") : ""}
         ${!aceOrDf ? renderChoiceGrid("Point Outcome", OUTCOME_OPTIONS, draft.outcome, `${prefix}-outcome`, "grid-cols-2") : ""}
         ${!aceOrDf ? renderChoiceGrid("Shot Type (Optional)", [{ value: "", label: "None" }, ...SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) }))], draft.shotType, `${prefix}-shot`, "grid-cols-2") : ""}
         <div>
           <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Optional Flags</p>
-          <p class="mb-3 text-sm text-court-200/60">Leave both buttons unselected if the point should not record this flag.</p>
+          <p class="mb-3 text-sm text-court-200/60 md:text-xs">Leave both buttons unselected if the point should not record this flag.</p>
           <div class="space-y-4">
             ${renderPlayerToggleSection(prefix, "netApproachStates", "Net Approach", match, draft.netApproachStates)}
             ${renderPlayerToggleSection(prefix, "returnWinnerStates", "Return Winner", match, draft.returnWinnerStates)}
           </div>
         </div>
-        <button data-action="${prefix}-save" class="w-full rounded-2xl bg-emerald-500 px-5 py-5 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400">
+        <button data-action="${prefix}-save" class="w-full rounded-2xl bg-emerald-500 px-5 py-5 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400 md:px-4 md:py-4 md:text-sm">
           ${submitLabel}
         </button>
       </div>
@@ -1474,7 +1474,7 @@ function renderChoiceGrid(label, options, selected, action, gridClass) {
               <button
                 data-action="${action}"
                 data-value="${option.value}"
-                class="min-h-14 rounded-2xl border px-4 py-4 text-sm font-medium transition ${
+                class="min-h-14 rounded-2xl border px-4 py-4 text-sm font-medium transition md:min-h-12 md:px-3 md:py-3 md:text-xs ${
                   active
                     ? "border-court-300 bg-court-300 text-court-950"
                     : "border-white/10 bg-white/5 text-court-100 hover:border-court-400/70"
@@ -1493,22 +1493,22 @@ function renderChoiceGrid(label, options, selected, action, gridClass) {
 function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
   const states = sanitizeFlagStates(flagStates);
   return `
-    <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4">
-      <p class="text-sm font-semibold text-white">${label}</p>
-      <div class="mt-4 space-y-3">
+    <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4 md:p-3">
+      <p class="text-sm font-semibold text-white md:text-xs">${label}</p>
+      <div class="mt-4 space-y-3 md:mt-3">
         ${[0, 1]
           .map((playerIndex) => {
             const selectedState = states[playerIndex] || "";
             return `
               <div class="flex items-center justify-between gap-3">
-                <p class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</p>
+                <p class="text-sm text-court-100 md:text-xs">${escapeHtml(playerName(match, playerIndex))}</p>
                 <div class="grid grid-cols-2 gap-2">
                   <button
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
                     data-value="yes"
-                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition ${
+                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
                       selectedState === "yes"
                         ? "border-emerald-400 bg-emerald-500/15 text-emerald-300"
                         : "border-white/10 bg-court-950/40 text-court-100"
@@ -1521,7 +1521,7 @@ function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
                     data-key="${key}"
                     data-player="${playerIndex}"
                     data-value="no"
-                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition ${
+                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
                       selectedState === "no"
                         ? "border-red-400/40 bg-red-500/10 text-red-200"
                         : "border-white/10 bg-court-950/40 text-court-100"
@@ -1638,44 +1638,37 @@ function renderLive(view) {
       : "";
 
   return `
-    <section class="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
-      <div class="space-y-5">
-        ${
-          computed.matchWinner === null
-            ? renderPointComposer(match, computed, state.draft, "draft")
-            : `<section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5 text-sm text-court-200/70">
-                Start a new match from the matches tab or export this result below.
-              </section>`
-        }
-        <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur">
+    <section class="space-y-4">
+      <div class="grid gap-4 md:grid-cols-2 md:items-start">
+        <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur md:p-4">
           <div class="flex items-start justify-between gap-4">
             <div>
               <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
-              <h2 class="mt-2 text-2xl font-bold text-white">${escapeHtml(match.playerA)} <span class="text-court-300/60">vs</span> ${escapeHtml(match.playerB)}</h2>
-              <p class="mt-2 text-sm text-court-200/65">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
+              <h2 class="mt-2 text-2xl font-bold text-white md:text-xl">${escapeHtml(match.playerA)} <span class="text-court-300/60">vs</span> ${escapeHtml(match.playerB)}</h2>
+              <p class="mt-2 text-sm text-court-200/65 md:text-xs">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
             </div>
-            <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right">
+            <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right md:px-3 md:py-2">
               <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Server</p>
-              <p class="mt-1 text-base font-semibold text-white">${playerName(match, computed.liveServer)}</p>
+              <p class="mt-1 text-base font-semibold text-white md:text-sm">${playerName(match, computed.liveServer)}</p>
             </div>
           </div>
           ${winnerBanner}
-          <div class="mt-5 grid gap-3 sm:grid-cols-3">${setCards}</div>
-          <div class="mt-5 rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5">
-            <div class="grid gap-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:items-start">
+          <div class="mt-4 grid gap-3 sm:grid-cols-3">${setCards}</div>
+          <div class="mt-4 rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5 md:p-4">
+            <div class="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.9fr)] md:items-start">
               <div>
                 <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center">
                   <div>
-                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60">${escapeHtml(match.playerA)}</p>
-                    <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[0]}</p>
+                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">${escapeHtml(match.playerA)}</p>
+                    <p class="mt-3 font-mono text-5xl font-semibold text-white md:mt-2 md:text-4xl">${computed.liveScoreDisplay[0]}</p>
                   </div>
                   <span class="text-court-300/30">:</span>
                   <div>
-                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60">${escapeHtml(match.playerB)}</p>
-                    <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[1]}</p>
+                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">${escapeHtml(match.playerB)}</p>
+                    <p class="mt-3 font-mono text-5xl font-semibold text-white md:mt-2 md:text-4xl">${computed.liveScoreDisplay[1]}</p>
                   </div>
                 </div>
-                <p class="mt-4 text-center text-sm text-court-200/65">${
+                <p class="mt-3 text-center text-sm text-court-200/65 md:text-xs">${
                   computed.liveGameType === "super_tiebreak"
                     ? "Super Tiebreak in progress"
                     : computed.liveGameType === "tiebreak"
@@ -1694,8 +1687,15 @@ function renderLive(view) {
             </div>
           </div>
         </section>
+        ${
+          computed.matchWinner === null
+            ? renderPointComposer(match, computed, state.draft, "draft")
+            : `<section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5 text-sm text-court-200/70 md:p-4 md:text-xs">
+                Start a new match from the matches tab or export this result below.
+              </section>`
+        }
       </div>
-      <div class="space-y-5">
+      <div>
         <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
           <div class="flex items-center justify-between gap-3">
             <div>
