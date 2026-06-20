@@ -1498,6 +1498,7 @@ function renderSetup() {
   const recent = state.matches.slice(0, 4);
   return `
     <main class="px-4 py-6 sm:px-6">
+      <input id="match-import-input" type="file" accept=".json,.csv,application/json,text/csv" class="hidden" />
       <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-6 shadow-panel backdrop-blur">
         <p class="text-xs uppercase tracking-[0.35em] text-court-300/70">Tennis Tracker</p>
         <h1 class="mt-3 text-3xl font-bold text-white">Start a match and log every point courtside.</h1>
@@ -1526,6 +1527,9 @@ function renderSetup() {
         </div>
         <button data-action="start-match" class="mt-6 w-full rounded-2xl bg-court-300 px-5 py-5 text-base font-semibold text-court-950 transition hover:bg-court-200">
           Start Match
+        </button>
+        <button data-action="import-match" class="mt-3 w-full rounded-2xl border border-court-300/35 bg-transparent px-5 py-5 text-base font-medium text-court-200 transition hover:border-court-300/60 hover:bg-white/5">
+          Import Match
         </button>
       </section>
       ${
@@ -1595,7 +1599,7 @@ function renderLive(view) {
         <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Score</p>
+              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
               <h2 class="mt-2 text-2xl font-bold text-white">${escapeHtml(match.playerA)} <span class="text-court-300/60">vs</span> ${escapeHtml(match.playerB)}</h2>
               <p class="mt-2 text-sm text-court-200/65">${formatDate(match.date)} · Best of 3 sets</p>
             </div>
@@ -1607,30 +1611,31 @@ function renderLive(view) {
           ${winnerBanner}
           <div class="mt-5 grid gap-3 sm:grid-cols-3">${setCards}</div>
           <div class="mt-5 rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5">
-            <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center">
+            <div class="grid gap-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:items-start">
               <div>
-                <p class="text-sm uppercase tracking-[0.22em] text-court-300/60">${escapeHtml(match.playerA)}</p>
-                <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[0]}</p>
+                <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center">
+                  <div>
+                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60">${escapeHtml(match.playerA)}</p>
+                    <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[0]}</p>
+                  </div>
+                  <span class="text-court-300/30">:</span>
+                  <div>
+                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60">${escapeHtml(match.playerB)}</p>
+                    <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[1]}</p>
+                  </div>
+                </div>
+                <p class="mt-4 text-center text-sm text-court-200/65">${computed.liveGameIsTiebreak ? "Tiebreak in progress" : "Current game score"}</p>
               </div>
-              <span class="text-court-300/30">:</span>
-              <div>
-                <p class="text-sm uppercase tracking-[0.22em] text-court-300/60">${escapeHtml(match.playerB)}</p>
-                <p class="mt-3 font-mono text-5xl font-semibold text-white">${computed.liveScoreDisplay[1]}</p>
+              <div class="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
+                ${renderMetric("Sets Won", `${computed.setsWon[0]} - ${computed.setsWon[1]}`)}
+                ${renderMetric("Games In Set", `${computed.liveSetGames[0]} - ${computed.liveSetGames[1]}`, `Set ${computed.liveSetIndex + 1}`)}
+                ${renderMetric("Points Logged", String(computed.totalPoints))}
               </div>
             </div>
-            <p class="mt-4 text-center text-sm text-court-200/65">${computed.liveGameIsTiebreak ? "Tiebreak in progress" : "Current game score"}</p>
           </div>
         </section>
       </div>
       <div class="space-y-5">
-        <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
-          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Match Summary</p>
-          <div class="mt-4 grid gap-3">
-            ${renderMetric("Sets Won", `${computed.setsWon[0]} - ${computed.setsWon[1]}`)}
-            ${renderMetric("Games In Set", `${computed.liveSetGames[0]} - ${computed.liveSetGames[1]}`, `Set ${computed.liveSetIndex + 1}`)}
-            ${renderMetric("Points Logged", String(computed.totalPoints))}
-          </div>
-        </section>
         <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
           <div class="flex items-center justify-between gap-3">
             <div>
