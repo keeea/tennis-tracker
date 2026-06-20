@@ -1611,7 +1611,11 @@ function renderSetup() {
 
 function renderLive(view) {
   const { match, computed } = view;
-  const setCards = [0, 1, 2]
+  const visibleSetIndexes = [0, 1];
+  if (computed.setsWon[0] === 1 && computed.setsWon[1] === 1) {
+    visibleSetIndexes.push(2);
+  }
+  const setCards = visibleSetIndexes
     .map((setIndex) => {
       const set = computed.sets.find((entry) => entry.index === setIndex);
       const isLiveSet = setIndex === computed.liveSetIndex;
