@@ -16,6 +16,10 @@ const OUTCOME_OPTIONS = [
   { value: "uncertain", label: "Uncertain" },
 ];
 const SHOT_OPTIONS = ["forehand", "backhand", "volley", "overhead", "drop_shot"];
+const RALLY_LENGTH_OPTIONS = [
+  { value: "short", label: "Short (1-4)" },
+  { value: "long", label: "Long (5+)" },
+];
 const TABS = ["live", "history", "stats", "matches"];
 const STORAGE_KEY = "tennisTracker.activeMatchId";
 const MATCH_FORMAT = "best_of_2_super_tiebreak";
@@ -34,10 +38,17 @@ const state = {
   history: {
     setIndex: 0,
     gameIndex: 0,
+    showFlaggedOnly: false,
   },
   editor: {
-    pointId: "",
+    entryId: "",
+    entryType: "point",
     draft: createEmptyDraft(),
+  },
+  adjustment: {
+    open: false,
+    editId: "",
+    draft: createEmptyCheckpointDraft(),
   },
   exportMessage: "",
   notice: "",
@@ -54,9 +65,22 @@ function createEmptyDraft() {
     serveResult: "",
     outcome: "",
     shotType: "",
+    forcingShotType: "",
+    rallyLength: "",
     winner: "",
+    flagged: false,
+    excludeFromStats: false,
     netApproachStates: createEmptyFlagStates(),
     returnWinnerStates: createEmptyFlagStates(),
+  };
+}
+
+function createEmptyCheckpointDraft() {
+  return {
+    setScore: ["0", "0"],
+    gameScore: ["0", "0"],
+    server: "0",
+    isTiebreak: false,
   };
 }
 
@@ -83,6 +107,13 @@ function createStatsBucket() {
       overhead: 0,
       drop_shot: 0,
     },
+    forcingShots: {
+      forehand: 0,
+      backhand: 0,
+      volley: 0,
+      overhead: 0,
+      drop_shot: 0,
+    },
     unforcedErrors: {
       forehand: 0,
       backhand: 0,
@@ -98,6 +129,10 @@ function createStatsBucket() {
     breakPointsConverted: 0,
     breakPointsFaced: 0,
     breakPointsSaved: 0,
+    shortRallyPointsPlayed: 0,
+    shortRallyPointsWon: 0,
+    longRallyPointsPlayed: 0,
+    longRallyPointsWon: 0,
     totalPointsWon: 0,
   };
 }
@@ -145,6 +180,10 @@ function playerName(match, index) {
 
 function flattenPoints(computed) {
   return computed.sets.flatMap((set) => set.games.flatMap((game) => game.points));
+}
+
+function flattenHistoryEntries(computed) {
+  return computed.historyEntries || [];
 }
 
 function shotLabel(shot) {
@@ -282,6 +321,58 @@ function normalizeShotType(value) {
   return SHOT_OPTIONS.includes(value) ? value : "";
 }
 
+function normalizeRallyLength(value) {
+  return value === "short" || value === "long" ? value : "";
+}
+
+function normalizeFlagged(value) {
+  return value === true;
+}
+
+function normalizeExcludeFromStats(value) {
+  return value === true;
+}
+
+function isCheckpointEntry(entry) {
+  return entry?.type === "checkpoint";
+}
+
+function sanitizeNumericScorePair(value, fallback = [0, 0]) {
+  if (!Array.isArray(value) || value.length < 2) {
+    return [...fallback];
+  }
+  return value.slice(0, 2).map((entry, index) => {
+    const next = Number(entry);
+    return Number.isFinite(next) && next >= 0 ? Math.floor(next) : fallback[index];
+  });
+}
+
+function standardPointLabelToValue(value) {
+  const mapping = { 0: 0, 15: 1, 30: 2, 40: 3, Ad: 4 };
+  return mapping[value] ?? 0;
+}
+
+function setIsCompleteByScore(score) {
+  const [gamesA, gamesB] = sanitizeNumericScorePair(score, [0, 0]);
+  const high = Math.max(gamesA, gamesB);
+  const low = Math.min(gamesA, gamesB);
+  return (
+    (high === 6 && low <= 4) ||
+    (high === 7 && (low === 5 || low === 6))
+  );
+}
+
+function shouldUseTiebreakGame(setScore, setIsMatchTiebreak) {
+  return setIsMatchTiebreak || (setScore[0] === 6 && setScore[1] === 6);
+}
+
+function checkpointGameIndex(currentSet, currentGame) {
+  if (currentGame) {
+    return currentGame.index;
+  }
+  return Math.max(currentSet.games.length - 1, 0);
+}
+
 function resolveNetApproachPlayers(rawPoint, winner, loser, server, receiver) {
   const explicit = sanitizePlayerIndexes(rawPoint.netApproachPlayers);
   if (explicit.length) {
@@ -327,23 +418,25 @@ function computeMatch(match) {
   const sets = [];
   const statsOverall = [createStatsBucket(), createStatsBucket()];
   const statsBySet = [];
-  const rawPoints = Array.isArray(match.points) ? match.points : [];
+  const rawEntries = Array.isArray(match.points) ? match.points : [];
+  const historyEntries = [];
   let setsWon = [0, 0];
   let currentSet = createSetContainer(0);
   currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
   let currentGame = null;
   let nextGameServer = Number.isInteger(match.initialServer) ? match.initialServer : 0;
   let matchWinner = null;
+  let flaggedPoints = 0;
 
-  function startGame() {
+  function startGame(serverOverride = nextGameServer, pointsWon = [0, 0]) {
     const isMatchTiebreak = currentSet.isMatchTiebreak;
     currentGame = {
       index: currentSet.games.length,
       setIndex: currentSet.index,
-      server: nextGameServer,
-      isTiebreak: isMatchTiebreak || (currentSet.gamesWon[0] === 6 && currentSet.gamesWon[1] === 6),
+      server: serverOverride,
+      isTiebreak: shouldUseTiebreakGame(currentSet.gamesWon, isMatchTiebreak),
       isSuperTiebreak: isMatchTiebreak,
-      pointsWon: [0, 0],
+      pointsWon: [...pointsWon],
       points: [],
       scoreBefore: [...currentSet.gamesWon],
       winner: null,
@@ -394,12 +487,81 @@ function computeMatch(match) {
     }
   }
 
-  rawPoints.forEach((rawPoint, pointListIndex) => {
+  function finalizeSetFromCheckpoint(serverOverride, scoreOverride = null) {
+    const winner = (scoreOverride || currentSet.gamesWon)[0] > (scoreOverride || currentSet.gamesWon)[1] ? 0 : 1;
+    currentSet.winner = winner;
+    currentSet.score = currentSet.isMatchTiebreak
+      ? [...(scoreOverride || currentGame?.pointsWon || [0, 0])]
+      : [...(scoreOverride || currentSet.gamesWon)];
+    setsWon[winner] += 1;
+    sets.push(currentSet);
+    currentGame = null;
+    nextGameServer = serverOverride;
+
+    if (setsWon[winner] === 2) {
+      matchWinner = winner;
+      return;
+    }
+
+    currentSet = createSetContainer(currentSet.index + 1);
+    currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
+  }
+
+  rawEntries.forEach((rawEntry, pointListIndex) => {
     if (matchWinner !== null) {
       return;
     }
+
+    if (isCheckpointEntry(rawEntry)) {
+      const setScore = sanitizeNumericScorePair(rawEntry.setScore, currentSet.gamesWon);
+      const server = Number(rawEntry.server) === 1 ? 1 : 0;
+      const useTiebreak = shouldUseTiebreakGame(setScore, currentSet.isMatchTiebreak);
+      const gameScore = sanitizeNumericScorePair(rawEntry.gameScore, [0, 0]);
+
+      historyEntries.push({
+        id: rawEntry.id,
+        type: "checkpoint",
+        rawIndex: pointListIndex,
+        setIndex: currentSet.index,
+        gameIndex: checkpointGameIndex(currentSet, currentGame),
+        pointNumber: null,
+        server,
+        setScore: [...setScore],
+        gameScore: [...gameScore],
+        isTiebreak: useTiebreak,
+        isSuperTiebreak: currentSet.isMatchTiebreak,
+        timestamp: typeof rawEntry.timestamp === "string" && rawEntry.timestamp ? rawEntry.timestamp : new Date().toISOString(),
+      });
+
+      currentSet.gamesWon = [...setScore];
+      currentSet.score = currentSet.isMatchTiebreak ? [...gameScore] : [...setScore];
+      nextGameServer = server;
+      currentGame = null;
+
+      if (currentSet.isMatchTiebreak) {
+        currentSet.tiebreakScore = [...gameScore];
+        if (isSuperTiebreakWon(gameScore[0], gameScore[1])) {
+          finalizeSetFromCheckpoint(server, gameScore);
+        } else {
+          startGame(server, gameScore);
+        }
+        return;
+      }
+
+      if (setIsCompleteByScore(setScore)) {
+        if ((setScore[0] === 7 || setScore[1] === 7) && (gameScore[0] > 0 || gameScore[1] > 0)) {
+          currentSet.tiebreakScore = [...gameScore];
+        }
+        finalizeSetFromCheckpoint(server);
+        return;
+      }
+
+      startGame(server, useTiebreak ? gameScore : gameScore);
+      return;
+    }
+
     if (!currentGame) {
-      startGame();
+      startGame(nextGameServer, [0, 0]);
     }
 
     const pointInGame = currentGame.points.length;
@@ -407,7 +569,7 @@ function computeMatch(match) {
       ? getTiebreakServer(currentGame.server, pointInGame)
       : currentGame.server;
     const receiver = 1 - server;
-    const winner = normalizeWinner(Number(rawPoint.winner));
+    const winner = normalizeWinner(Number(rawEntry.winner));
     if (winner === null) {
       return;
     }
@@ -416,71 +578,95 @@ function computeMatch(match) {
     const scoreBeforeGamePoint = currentGame.isTiebreak
       ? [...currentGame.pointsWon]
       : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1]);
-    const netApproachPlayers = resolveNetApproachPlayers(rawPoint, winner, loser, server, receiver);
-    const returnWinnerPlayers = resolveReturnWinnerPlayers(rawPoint, receiver);
-    const shotType = normalizeShotType(rawPoint.shotType);
+    const netApproachPlayers = resolveNetApproachPlayers(rawEntry, winner, loser, server, receiver);
+    const returnWinnerPlayers = resolveReturnWinnerPlayers(rawEntry, receiver);
+    const shotType = normalizeShotType(rawEntry.shotType);
+    const forcingShotType = normalizeShotType(rawEntry.forcingShotType);
+    const rallyLength = normalizeRallyLength(rawEntry.rallyLength);
     const setBuckets = ensureSetBucket(statsBySet, currentSet.index);
+    const flagged = normalizeFlagged(rawEntry.flagged);
+    const excludeFromStats = normalizeExcludeFromStats(rawEntry.excludeFromStats);
 
-    [statsOverall, setBuckets].forEach((bucketGroup) => {
-      bucketGroup[winner].totalPointsWon += 1;
-      bucketGroup[server].servicePoints += 1;
-      bucketGroup[receiver].returnPoints += 1;
-      bucketGroup[server].firstServeAttempts += 1;
+    if (flagged) {
+      flaggedPoints += 1;
+    }
 
-      if (rawPoint.serveResult === "first_in" || rawPoint.serveResult === "ace") {
-        bucketGroup[server].firstServeIn += 1;
-        if (winner === server) {
-          bucketGroup[server].firstServePointsWon += 1;
+    if (!excludeFromStats) {
+      [statsOverall, setBuckets].forEach((bucketGroup) => {
+        bucketGroup[winner].totalPointsWon += 1;
+        bucketGroup[server].servicePoints += 1;
+        bucketGroup[receiver].returnPoints += 1;
+        bucketGroup[server].firstServeAttempts += 1;
+
+        if (rawEntry.serveResult === "first_in" || rawEntry.serveResult === "ace") {
+          bucketGroup[server].firstServeIn += 1;
+          if (winner === server) {
+            bucketGroup[server].firstServePointsWon += 1;
+          }
         }
-      }
 
-      if (rawPoint.serveResult === "second_in" || rawPoint.serveResult === "double_fault") {
-        bucketGroup[server].secondServeAttempts += 1;
-      }
-
-      if (rawPoint.serveResult === "second_in") {
-        bucketGroup[server].secondServeIn += 1;
-        if (winner === server) {
-          bucketGroup[server].secondServePointsWon += 1;
+        if (rawEntry.serveResult === "second_in" || rawEntry.serveResult === "double_fault") {
+          bucketGroup[server].secondServeAttempts += 1;
         }
-      }
 
-      if (rawPoint.serveResult === "ace") {
-        bucketGroup[server].aces += 1;
-      }
+        if (rawEntry.serveResult === "second_in") {
+          bucketGroup[server].secondServeIn += 1;
+          if (winner === server) {
+            bucketGroup[server].secondServePointsWon += 1;
+          }
+        }
 
-      if (rawPoint.serveResult === "double_fault") {
-        bucketGroup[server].doubleFaults += 1;
-      }
+        if (rawEntry.serveResult === "ace") {
+          bucketGroup[server].aces += 1;
+        }
 
-      if (rawPoint.outcome === "winner" && shotType && bucketGroup[winner].winners[shotType] !== undefined) {
-        bucketGroup[winner].winners[shotType] += 1;
-      }
+        if (rawEntry.serveResult === "double_fault") {
+          bucketGroup[server].doubleFaults += 1;
+        }
 
-      if (rawPoint.outcome === "unforced_error" && shotType && bucketGroup[loser].unforcedErrors[shotType] !== undefined) {
-        bucketGroup[loser].unforcedErrors[shotType] += 1;
-      }
+        if (rawEntry.outcome === "winner" && shotType && bucketGroup[winner].winners[shotType] !== undefined) {
+          bucketGroup[winner].winners[shotType] += 1;
+        }
 
-      if (rawPoint.outcome === "forced_error") {
-        bucketGroup[loser].forcedErrors += 1;
-      }
+        if (rawEntry.outcome === "unforced_error" && shotType && bucketGroup[loser].unforcedErrors[shotType] !== undefined) {
+          bucketGroup[loser].unforcedErrors[shotType] += 1;
+        }
 
-      netApproachPlayers.forEach((playerIndex) => {
-        bucketGroup[playerIndex].netPointsPlayed += 1;
-        if (winner === playerIndex) {
-          bucketGroup[playerIndex].netPointsWon += 1;
+        if (rawEntry.outcome === "forced_error") {
+          bucketGroup[loser].forcedErrors += 1;
+          if (forcingShotType && bucketGroup[winner].forcingShots[forcingShotType] !== undefined) {
+            bucketGroup[winner].forcingShots[forcingShotType] += 1;
+          }
+        }
+
+        netApproachPlayers.forEach((playerIndex) => {
+          bucketGroup[playerIndex].netPointsPlayed += 1;
+          if (winner === playerIndex) {
+            bucketGroup[playerIndex].netPointsWon += 1;
+          }
+        });
+
+        returnWinnerPlayers.forEach((playerIndex) => {
+          bucketGroup[playerIndex].returnWinners += 1;
+        });
+
+        if (rallyLength === "short") {
+          bucketGroup[0].shortRallyPointsPlayed += 1;
+          bucketGroup[1].shortRallyPointsPlayed += 1;
+          bucketGroup[winner].shortRallyPointsWon += 1;
+        }
+        if (rallyLength === "long") {
+          bucketGroup[0].longRallyPointsPlayed += 1;
+          bucketGroup[1].longRallyPointsPlayed += 1;
+          bucketGroup[winner].longRallyPointsWon += 1;
+        }
+
+        if (isBreakChance) {
+          bucketGroup[receiver].breakPointsOpportunities += 1;
+          bucketGroup[server].breakPointsFaced += 1;
         }
       });
-
-      returnWinnerPlayers.forEach((playerIndex) => {
-        bucketGroup[playerIndex].returnWinners += 1;
-      });
-
-      if (isBreakChance) {
-        bucketGroup[receiver].breakPointsOpportunities += 1;
-        bucketGroup[server].breakPointsFaced += 1;
-      }
-    });
+    }
 
     currentGame.pointsWon[winner] += 1;
     const wonGame = currentGame.isTiebreak
@@ -492,7 +678,7 @@ function computeMatch(match) {
       ? [...currentGame.pointsWon]
       : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1]);
 
-    if (isBreakChance) {
+    if (isBreakChance && !excludeFromStats) {
       [statsOverall, setBuckets].forEach((bucketGroup) => {
         if (winner === receiver && wonGame) {
           bucketGroup[receiver].breakPointsConverted += 1;
@@ -504,7 +690,9 @@ function computeMatch(match) {
     }
 
     currentGame.points.push({
-      id: rawPoint.id,
+      id: rawEntry.id,
+      ...rawEntry,
+      type: "point",
       rawIndex: pointListIndex,
       setIndex: currentSet.index,
       gameIndex: currentGame.index,
@@ -516,10 +704,16 @@ function computeMatch(match) {
       scoreBefore: scoreBeforeGamePoint,
       scoreAfter: scoreAfterGamePoint,
       isBreakPoint: isBreakChance,
+      shotType,
       netApproachPlayers,
       returnWinnerPlayers,
-      ...rawPoint,
+      flagged,
+      excludeFromStats,
+      forcingShotType,
+      rallyLength,
     });
+
+    historyEntries.push(currentGame.points[currentGame.points.length - 1]);
 
     if (wonGame) {
       finalizeGame();
@@ -569,7 +763,9 @@ function computeMatch(match) {
       : currentSet.gamesWon[0] === 6 && currentSet.gamesWon[1] === 6
         ? ["0", "0"]
         : ["0", "0"],
-    totalPoints: rawPoints.length,
+    totalPoints: historyEntries.filter((entry) => entry.type === "point").length,
+    flaggedPoints,
+    historyEntries,
   };
 }
 
@@ -635,8 +831,14 @@ async function deleteMatch(matchId) {
 function resetDrafts() {
   state.draft = createEmptyDraft();
   state.editor = {
-    pointId: "",
+    entryId: "",
+    entryType: "point",
     draft: createEmptyDraft(),
+  };
+  state.adjustment = {
+    open: false,
+    editId: "",
+    draft: createEmptyCheckpointDraft(),
   };
 }
 
@@ -668,6 +870,34 @@ function encodeDataForExport(match) {
       initialServer: playerName(match, match.initialServer),
       format: match.format,
     },
+    entries: (Array.isArray(match.points) ? match.points : []).map((entry) => (
+      isCheckpointEntry(entry)
+        ? {
+          id: entry.id,
+          type: "checkpoint",
+          setScore: sanitizeNumericScorePair(entry.setScore, [0, 0]),
+          gameScore: sanitizeNumericScorePair(entry.gameScore, [0, 0]),
+          server: Number(entry.server) === 1 ? 1 : 0,
+          timestamp: entry.timestamp,
+        }
+        : {
+          id: entry.id,
+          type: "point",
+          serveResult: entry.serveResult,
+          outcome: entry.outcome || "",
+          shotType: normalizeShotType(entry.shotType),
+          forcingShotType: normalizeShotType(entry.forcingShotType),
+          rallyLength: normalizeRallyLength(entry.rallyLength),
+          winner: Number(entry.winner),
+          flagged: normalizeFlagged(entry.flagged),
+          excludeFromStats: normalizeExcludeFromStats(entry.excludeFromStats),
+          netApproach: Boolean(entry.netApproach),
+          netApproachPlayers: sanitizePlayerIndexes(entry.netApproachPlayers),
+          returnWinner: Boolean(entry.returnWinner),
+          returnWinnerPlayers: sanitizePlayerIndexes(entry.returnWinnerPlayers),
+          timestamp: entry.timestamp,
+        }
+    )),
     summary: {
       setsWon: computed.setsWon,
       totalPoints: computed.totalPoints,
@@ -697,11 +927,15 @@ function encodeDataForExport(match) {
           serveResult: point.serveResult,
           outcome: point.outcome,
           shotType: normalizeShotType(point.shotType),
+          forcingShotType: normalizeShotType(point.forcingShotType),
+          rallyLength: normalizeRallyLength(point.rallyLength),
           netApproach: point.netApproach,
           netApproachPlayers: point.netApproachPlayers.map((index) => playerName(match, index)),
           returnWinner: point.returnWinner,
           returnWinnerPlayers: point.returnWinnerPlayers.map((index) => playerName(match, index)),
           isBreakPoint: point.isBreakPoint,
+          flagged: normalizeFlagged(point.flagged),
+          excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
         })),
       })),
     })),
@@ -724,6 +958,8 @@ function makeCsv(match) {
       "serve_result",
       "outcome",
       "shot_type",
+      "forcing_shot_type",
+      "rally_length",
       "score_before",
       "score_after",
       "break_point",
@@ -731,6 +967,8 @@ function makeCsv(match) {
       "net_players",
       "return_winner",
       "return_winner_players",
+      "flagged",
+      "exclude_from_stats",
     ],
   ];
 
@@ -748,6 +986,8 @@ function makeCsv(match) {
           point.serveResult,
           point.outcome,
           normalizeShotType(point.shotType),
+          normalizeShotType(point.forcingShotType),
+          normalizeRallyLength(point.rallyLength),
           Array.isArray(point.scoreBefore) ? point.scoreBefore.join("-") : point.scoreBefore,
           Array.isArray(point.scoreAfter) ? point.scoreAfter.join("-") : point.scoreAfter,
           point.isBreakPoint ? "yes" : "no",
@@ -755,6 +995,8 @@ function makeCsv(match) {
           formatPlayerList(match, point.netApproachPlayers),
           point.returnWinnerPlayers.length ? "yes" : "no",
           formatPlayerList(match, point.returnWinnerPlayers),
+          normalizeFlagged(point.flagged) ? "yes" : "no",
+          normalizeExcludeFromStats(point.excludeFromStats) ? "yes" : "no",
         ]);
       });
     });
@@ -783,6 +1025,16 @@ function validateImportedPoint(point) {
   if (!point || typeof point !== "object") {
     throw new Error("Invalid point record.");
   }
+  if (isCheckpointEntry(point)) {
+    return {
+      id: crypto.randomUUID(),
+      type: "checkpoint",
+      setScore: sanitizeNumericScorePair(point.setScore, [0, 0]),
+      gameScore: sanitizeNumericScorePair(point.gameScore, [0, 0]),
+      server: Number(point.server) === 1 ? 1 : 0,
+      timestamp: typeof point.timestamp === "string" && point.timestamp ? point.timestamp : new Date().toISOString(),
+    };
+  }
   if (typeof point.id !== "string" || !point.id) {
     throw new Error("Imported point is missing an id.");
   }
@@ -799,12 +1051,23 @@ function validateImportedPoint(point) {
   if (point.shotType !== "" && point.shotType !== undefined && !SHOT_OPTIONS.includes(point.shotType)) {
     throw new Error("Imported point has an invalid shot type.");
   }
+  if (point.forcingShotType !== "" && point.forcingShotType !== undefined && !SHOT_OPTIONS.includes(point.forcingShotType)) {
+    throw new Error("Imported point has an invalid forcing shot type.");
+  }
+  if (point.rallyLength !== "" && point.rallyLength !== undefined && point.rallyLength !== "short" && point.rallyLength !== "long") {
+    throw new Error("Imported point has an invalid rally length.");
+  }
   return {
     id: crypto.randomUUID(),
+    type: "point",
     serveResult: point.serveResult,
     outcome: point.outcome || "",
     shotType: normalizeShotType(point.shotType),
+    forcingShotType: normalizeShotType(point.forcingShotType),
+    rallyLength: normalizeRallyLength(point.rallyLength),
     winner,
+    flagged: normalizeFlagged(point.flagged),
+    excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
     netApproach: Boolean(point.netApproach),
     netApproachPlayers: sanitizePlayerIndexes(point.netApproachPlayers),
     returnWinner: Boolean(point.returnWinner),
@@ -917,7 +1180,9 @@ function importMatchFromJson(text) {
   }
 
   if (!payload || typeof payload !== "object" || !payload.match || !Array.isArray(payload.sets)) {
-    throw new Error("JSON does not match the exported match format.");
+    if (!payload || typeof payload !== "object" || !payload.match || !Array.isArray(payload.entries)) {
+      throw new Error("JSON does not match the exported match format.");
+    }
   }
   if (typeof payload.match.id !== "string" || !payload.match.id) {
     throw new Error("JSON export is missing the original match id.");
@@ -939,6 +1204,11 @@ function importMatchFromJson(text) {
   }
 
   const points = [];
+  if (Array.isArray(payload.entries)) {
+    payload.entries.forEach((entry) => {
+      points.push(validateImportedPoint(entry));
+    });
+  } else {
   payload.sets.forEach((set, setIndex) => {
     if (!set || typeof set !== "object" || !Array.isArray(set.games)) {
       throw new Error(`JSON export is missing games for set ${setIndex + 1}.`);
@@ -953,10 +1223,15 @@ function importMatchFromJson(text) {
         }
         points.push(validateImportedPoint({
           id: point.id || crypto.randomUUID(),
+          type: "point",
           serveResult: point.serveResult,
           outcome: point.outcome || "",
           shotType: point.shotType || "",
+          forcingShotType: point.forcingShotType || "",
+          rallyLength: point.rallyLength || "",
           winner: playerLookup.get(point.winner),
+          flagged: normalizeFlagged(point.flagged),
+          excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
           netApproach: point.netApproach,
           netApproachPlayers: Array.isArray(point.netApproachPlayers)
             ? point.netApproachPlayers.map((name) => {
@@ -979,6 +1254,7 @@ function importMatchFromJson(text) {
       });
     });
   });
+  }
 
   const importedMatch = createImportedMatch({
     playerA,
@@ -1008,6 +1284,8 @@ function importMatchFromCsv(text) {
     "serve_result",
     "outcome",
     "shot_type",
+    "forcing_shot_type",
+    "rally_length",
     "score_before",
     "score_after",
     "break_point",
@@ -1015,6 +1293,8 @@ function importMatchFromCsv(text) {
     "net_players",
     "return_winner",
     "return_winner_players",
+    "flagged",
+    "exclude_from_stats",
   ];
   if (headers.length !== expectedHeaders.length || headers.some((header, index) => header !== expectedHeaders[index])) {
     throw new Error("CSV does not match the exported match format.");
@@ -1061,11 +1341,15 @@ function importMatchFromCsv(text) {
       serveResult: record.serve_result,
       outcome: record.outcome,
       shotType: record.shot_type,
+      forcingShotType: record.forcing_shot_type,
+      rallyLength: record.rally_length,
       winner: playerLookup.get(record.winner.trim()),
       netApproach: record.net_approach === "yes",
       netApproachPlayers: parsePlayerList(record.net_players, playerLookup),
       returnWinner: record.return_winner === "yes",
       returnWinnerPlayers: parsePlayerList(record.return_winner_players, playerLookup),
+      flagged: record.flagged === "yes",
+      excludeFromStats: record.exclude_from_stats === "yes",
     }));
 
   const importedMatch = createImportedMatch({
@@ -1180,6 +1464,7 @@ function validatePointDraft(draft, computed) {
     draft.winner = String(server);
     draft.outcome = "";
     draft.shotType = "";
+    draft.forcingShotType = "";
     draft.netApproachStates = createEmptyFlagStates();
     draft.returnWinnerStates = createEmptyFlagStates();
   }
@@ -1187,6 +1472,7 @@ function validatePointDraft(draft, computed) {
     draft.winner = String(receiver);
     draft.outcome = "";
     draft.shotType = "";
+    draft.forcingShotType = "";
     draft.netApproachStates = createEmptyFlagStates();
     draft.returnWinnerStates = createEmptyFlagStates();
   }
@@ -1201,7 +1487,132 @@ function validatePointDraft(draft, computed) {
   if (flagStatesToPlayers(draft.returnWinnerStates).length && draft.outcome !== "winner") {
     return "Return winner only applies to winner outcomes.";
   }
+  if (draft.outcome !== "forced_error") {
+    draft.forcingShotType = "";
+  }
   return "";
+}
+
+function getCheckpointDraftFromComputed(computed) {
+  return {
+    setScore: computed.liveSetGames.map(String),
+    gameScore: computed.liveGamePoints.map(String),
+    server: String(computed.liveServer),
+    isTiebreak: computed.liveGameIsTiebreak || computed.liveSetIsMatchTiebreak,
+  };
+}
+
+function getCheckpointDraftFromEntry(entry) {
+  return {
+    setScore: sanitizeNumericScorePair(entry.setScore, [0, 0]).map(String),
+    gameScore: sanitizeNumericScorePair(entry.gameScore, [0, 0]).map(String),
+    server: String(Number(entry.server) === 1 ? 1 : 0),
+    isTiebreak: Boolean(entry.isTiebreak || entry.isSuperTiebreak),
+  };
+}
+
+function normalizeCheckpointDraft(draft) {
+  const isTiebreak = Boolean(draft.isTiebreak);
+  return {
+    setScore: sanitizeNumericScorePair(draft.setScore, [0, 0]),
+    gameScore: isTiebreak
+      ? sanitizeNumericScorePair(draft.gameScore, [0, 0])
+      : draft.gameScore.map((value) => standardPointLabelToValue(value)),
+    server: Number(draft.server) === 1 ? 1 : 0,
+    isTiebreak,
+  };
+}
+
+function validateCheckpointDraft(draft) {
+  const normalized = normalizeCheckpointDraft(draft);
+  const [setA, setB] = normalized.setScore;
+  const [gameA, gameB] = normalized.gameScore;
+
+  if (setA > 7 || setB > 7) {
+    return "Set score must stay within standard set bounds.";
+  }
+  if (!normalized.isTiebreak && (gameA > 4 || gameB > 4)) {
+    return "Standard game scores must be 0, 15, 30, 40, or Ad.";
+  }
+  if (!normalized.isTiebreak && gameA === 4 && gameB === 4) {
+    return "Both players cannot have Ad at the same time.";
+  }
+  return "";
+}
+
+function openAdjustmentModal() {
+  const view = derivedCurrentMatch();
+  if (!view || view.computed.matchWinner !== null) {
+    return;
+  }
+  state.editor = {
+    entryId: "",
+    entryType: "point",
+    draft: createEmptyDraft(),
+  };
+  state.adjustment.open = true;
+  state.adjustment.editId = "";
+  state.adjustment.draft = getCheckpointDraftFromComputed(view.computed);
+  render();
+}
+
+function openAdjustmentEditor(entry) {
+  state.editor = {
+    entryId: "",
+    entryType: "point",
+    draft: createEmptyDraft(),
+  };
+  state.adjustment.open = true;
+  state.adjustment.editId = entry.id;
+  state.adjustment.draft = getCheckpointDraftFromEntry(entry);
+  render();
+}
+
+function closeAdjustmentModal() {
+  state.adjustment.open = false;
+  state.adjustment.editId = "";
+  state.adjustment.draft = createEmptyCheckpointDraft();
+  render();
+}
+
+async function applyCheckpointDraft() {
+  const view = derivedCurrentMatch();
+  if (!view) {
+    return;
+  }
+  const error = validateCheckpointDraft(state.adjustment.draft);
+  if (error) {
+    state.error = error;
+    render();
+    return;
+  }
+
+  const normalized = normalizeCheckpointDraft(state.adjustment.draft);
+  const nextEntry = {
+    id: state.adjustment.editId || crypto.randomUUID(),
+    type: "checkpoint",
+    setScore: normalized.setScore,
+    gameScore: normalized.gameScore,
+    server: normalized.server,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (state.adjustment.editId) {
+    const entryIndex = view.match.points.findIndex((point) => point.id === state.adjustment.editId);
+    if (entryIndex < 0) {
+      return;
+    }
+    view.match.points[entryIndex] = {
+      ...view.match.points[entryIndex],
+      ...nextEntry,
+    };
+  } else {
+    view.match.points.push(nextEntry);
+  }
+
+  await saveMatch(view.match);
+  state.error = "";
+  closeAdjustmentModal();
 }
 
 async function createMatchFromSetup() {
@@ -1242,10 +1653,15 @@ async function addPoint() {
   }
   view.match.points.push({
     id: crypto.randomUUID(),
+    type: "point",
     serveResult: draft.serveResult,
     outcome: draft.outcome,
     shotType: normalizeShotType(draft.shotType),
+    forcingShotType: draft.outcome === "forced_error" ? normalizeShotType(draft.forcingShotType) : "",
+    rallyLength: normalizeRallyLength(draft.rallyLength),
     winner: Number(draft.winner),
+    flagged: Boolean(draft.flagged),
+    excludeFromStats: Boolean(draft.excludeFromStats),
     netApproach: flagStatesToPlayers(draft.netApproachStates).length > 0,
     netApproachPlayers: flagStatesToPlayers(draft.netApproachStates),
     returnWinner: flagStatesToPlayers(draft.returnWinnerStates).length > 0,
@@ -1256,6 +1672,7 @@ async function addPoint() {
   state.error = "";
   state.exportMessage = "";
   state.history = {
+    ...state.history,
     setIndex: 0,
     gameIndex: 0,
   };
@@ -1269,10 +1686,10 @@ function findPointById(match, pointId) {
 
 async function savePointEdit() {
   const view = derivedCurrentMatch();
-  if (!view || !state.editor.pointId) {
+  if (!view || !state.editor.entryId || state.editor.entryType !== "point") {
     return;
   }
-  const pointIndex = view.match.points.findIndex((point) => point.id === state.editor.pointId);
+  const pointIndex = view.match.points.findIndex((point) => point.id === state.editor.entryId);
   if (pointIndex < 0) {
     return;
   }
@@ -1291,12 +1708,14 @@ async function savePointEdit() {
     draft.winner = String(server);
     draft.outcome = "";
     draft.shotType = "";
+    draft.forcingShotType = "";
     draft.netApproachStates = createEmptyFlagStates();
     draft.returnWinnerStates = createEmptyFlagStates();
   } else if (draft.serveResult === "double_fault") {
     draft.winner = String(receiver);
     draft.outcome = "";
     draft.shotType = "";
+    draft.forcingShotType = "";
     draft.netApproachStates = createEmptyFlagStates();
     draft.returnWinnerStates = createEmptyFlagStates();
   } else {
@@ -1311,13 +1730,21 @@ async function savePointEdit() {
     render();
     return;
   }
+  if (draft.outcome !== "forced_error") {
+    draft.forcingShotType = "";
+  }
 
   view.match.points[pointIndex] = {
     ...original,
+    type: "point",
     serveResult: draft.serveResult,
     outcome: draft.outcome,
     shotType: normalizeShotType(draft.shotType),
+    forcingShotType: draft.outcome === "forced_error" ? normalizeShotType(draft.forcingShotType) : "",
+    rallyLength: normalizeRallyLength(draft.rallyLength),
     winner: Number(draft.winner),
+    flagged: Boolean(draft.flagged),
+    excludeFromStats: Boolean(draft.excludeFromStats),
     netApproach: flagStatesToPlayers(draft.netApproachStates).length > 0,
     netApproachPlayers: flagStatesToPlayers(draft.netApproachStates),
     returnWinner: flagStatesToPlayers(draft.returnWinnerStates).length > 0,
@@ -1338,7 +1765,8 @@ async function deletePoint(pointId) {
   if (target < 0) {
     return;
   }
-  if (!window.confirm("Delete this point?")) {
+  const targetEntry = view.match.points[target];
+  if (!window.confirm(`Delete this ${isCheckpointEntry(targetEntry) ? "score adjustment" : "point"}?`)) {
     return;
   }
   view.match.points.splice(target, 1);
@@ -1350,16 +1778,33 @@ async function deletePoint(pointId) {
 function openEditor(pointId) {
   const view = derivedCurrentMatch();
   const point = view?.match ? findPointById(view.match, pointId) : null;
-  const derivedPoint = view ? flattenPoints(view.computed).find((entry) => entry.id === pointId) : null;
-  if (!point || !derivedPoint) {
+  if (!point) {
     return;
   }
-  state.editor.pointId = pointId;
+  if (isCheckpointEntry(point)) {
+    openAdjustmentEditor(point);
+    return;
+  }
+  const derivedPoint = view ? flattenPoints(view.computed).find((entry) => entry.id === pointId) : null;
+  if (!derivedPoint) {
+    return;
+  }
+  state.adjustment = {
+    open: false,
+    editId: "",
+    draft: createEmptyCheckpointDraft(),
+  };
+  state.editor.entryId = pointId;
+  state.editor.entryType = "point";
   state.editor.draft = {
     serveResult: point.serveResult,
     outcome: point.outcome,
     shotType: point.shotType === "serve" ? "" : normalizeShotType(point.shotType),
+    forcingShotType: normalizeShotType(point.forcingShotType),
+    rallyLength: normalizeRallyLength(point.rallyLength),
     winner: String(point.winner),
+    flagged: normalizeFlagged(point.flagged),
+    excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
     netApproachStates: playersToFlagStates(derivedPoint.netApproachPlayers),
     returnWinnerStates: playersToFlagStates(derivedPoint.returnWinnerPlayers),
   };
@@ -1381,7 +1826,7 @@ function setActiveMatch(matchId) {
 }
 
 function setHistoryFocus(setIndex, gameIndex) {
-  state.history = { setIndex, gameIndex };
+  state.history = { ...state.history, setIndex, gameIndex };
   render();
 }
 
@@ -1391,9 +1836,13 @@ function setDraftValue(target, key, value) {
     if (value === "ace" || value === "double_fault") {
       state[target].outcome = "";
       state[target].shotType = "";
+      state[target].forcingShotType = "";
       state[target].netApproachStates = createEmptyFlagStates();
       state[target].returnWinnerStates = createEmptyFlagStates();
     }
+  }
+  if (key === "outcome" && value !== "forced_error") {
+    state[target].forcingShotType = "";
   }
   render();
 }
@@ -1403,8 +1852,40 @@ function updateEditorDraft(key, value) {
   if (key === "serveResult" && (value === "ace" || value === "double_fault")) {
     state.editor.draft.outcome = "";
     state.editor.draft.shotType = "";
+    state.editor.draft.forcingShotType = "";
     state.editor.draft.netApproachStates = createEmptyFlagStates();
     state.editor.draft.returnWinnerStates = createEmptyFlagStates();
+  }
+  if (key === "outcome" && value !== "forced_error") {
+    state.editor.draft.forcingShotType = "";
+  }
+  render();
+}
+
+function toggleOptionalChoice(target, key, value) {
+  const current = state[target][key];
+  setDraftValue(target, key, current === value ? "" : value);
+}
+
+function toggleEditorOptionalChoice(key, value) {
+  const current = state.editor.draft[key];
+  updateEditorDraft(key, current === value ? "" : value);
+}
+
+function updateAdjustmentDraft(key, value) {
+  state.adjustment.draft[key] = value;
+  render();
+}
+
+function updateAdjustmentScore(key, playerIndex, value) {
+  const next = [...state.adjustment.draft[key]];
+  next[playerIndex] = value;
+  state.adjustment.draft[key] = next;
+  if (key === "setScore") {
+    const normalizedSet = sanitizeNumericScorePair(next, [0, 0]);
+    if (normalizedSet[0] === 6 && normalizedSet[1] === 6) {
+      state.adjustment.draft.isTiebreak = true;
+    }
   }
   render();
 }
@@ -1445,11 +1926,15 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
         ${renderChoiceGrid("Serve Result", SERVE_OPTIONS, draft.serveResult, `${prefix}-serve`, "grid-cols-2")}
         ${!aceOrDf ? renderChoiceGrid("Who Won The Point", [{ value: "0", label: match.playerA }, { value: "1", label: match.playerB }], draft.winner, `${prefix}-winner`, "grid-cols-2") : ""}
         ${!aceOrDf ? renderChoiceGrid("Point Outcome", OUTCOME_OPTIONS, draft.outcome, `${prefix}-outcome`, "grid-cols-2") : ""}
-        ${!aceOrDf ? renderChoiceGrid("Shot Type (Optional)", [{ value: "", label: "None" }, ...SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) }))], draft.shotType, `${prefix}-shot`, "grid-cols-2") : ""}
+        ${!aceOrDf ? renderChoiceGrid("Shot Type (Optional)", SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) })), draft.shotType, `${prefix}-shot`, "grid-cols-2", true) : ""}
+        ${!aceOrDf && draft.outcome === "forced_error" ? renderChoiceGrid("Forcing Shot Type (Optional)", SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) })), draft.forcingShotType, `${prefix}-forcing-shot`, "grid-cols-2", true) : ""}
+        ${renderChoiceGrid("Rally Length (Optional)", RALLY_LENGTH_OPTIONS, draft.rallyLength, `${prefix}-rally`, "grid-cols-2", true)}
         <div>
           <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Optional Flags</p>
           <p class="mb-3 text-sm text-court-200/60 md:text-xs">Leave both buttons unselected if the point should not record this flag.</p>
           <div class="space-y-4">
+            ${renderBooleanToggle(prefix, "flagged", "Flag For Review", draft.flagged, "Marks this point for post-match review.")}
+            ${renderBooleanToggle(prefix, "excludeFromStats", "Exclude From Stats", draft.excludeFromStats, "Point still counts for score but excluded from statistics.")}
             ${renderPlayerToggleSection(prefix, "netApproachStates", "Net Approach", match, draft.netApproachStates)}
             ${renderPlayerToggleSection(prefix, "returnWinnerStates", "Return Winner", match, draft.returnWinnerStates)}
           </div>
@@ -1462,7 +1947,31 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
   `;
 }
 
-function renderChoiceGrid(label, options, selected, action, gridClass) {
+function renderBooleanToggle(prefix, key, label, selected, description = "") {
+  return `
+    <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4 md:p-3">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <p class="text-sm font-semibold text-white md:text-xs">${label}</p>
+          ${description ? `<p class="mt-1 text-sm text-court-200/60 md:text-xs">${description}</p>` : ""}
+        </div>
+        <button
+          data-action="${prefix}-toggle-boolean"
+          data-key="${key}"
+          class="rounded-xl border px-4 py-2 text-sm font-medium transition md:px-3 md:py-1.5 md:text-xs ${
+            selected
+              ? "border-court-300/50 bg-court-300/15 text-court-100"
+              : "border-white/10 bg-court-950/40 text-court-100"
+          }"
+        >
+          ${selected ? "On" : "Off"}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderChoiceGrid(label, options, selected, action, gridClass, allowUnset = false) {
   return `
     <div>
       <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">${label}</p>
@@ -1474,6 +1983,7 @@ function renderChoiceGrid(label, options, selected, action, gridClass) {
               <button
                 data-action="${action}"
                 data-value="${option.value}"
+                data-allow-unset="${allowUnset ? "yes" : "no"}"
                 class="min-h-14 rounded-2xl border px-4 py-4 text-sm font-medium transition md:min-h-12 md:px-3 md:py-3 md:text-xs ${
                   active
                     ? "border-court-300 bg-court-300 text-court-950"
@@ -1685,6 +2195,12 @@ function renderLive(view) {
                 ${renderMetric("Points Logged", String(computed.totalPoints))}
               </div>
             </div>
+            <div class="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+              <p class="text-sm text-court-100">Flagged: <span class="font-semibold text-amber-200">${computed.flaggedPoints}</span></p>
+              <button data-action="open-adjust-score" class="rounded-xl border border-white/10 px-4 py-2 text-sm text-court-100 transition hover:border-court-300/40 hover:bg-white/5">
+                Adjust Score
+              </button>
+            </div>
           </div>
         </section>
         ${
@@ -1720,6 +2236,9 @@ function renderHistory(view) {
   const set = computed.sets.find((entry) => entry.index === state.history.setIndex) || computed.sets[0];
   const game = set?.games.find((entry) => entry.index === state.history.gameIndex) || set?.games[0];
   const allSets = computed.sets.length ? computed.sets : [createSetContainer(0)];
+  const historyEntries = state.history.showFlaggedOnly
+    ? flattenHistoryEntries(computed).filter((entry) => entry.type === "point" && normalizeFlagged(entry.flagged))
+    : flattenHistoryEntries(computed).filter((entry) => entry.setIndex === set?.index && entry.gameIndex === game?.index);
 
   return `
     <section class="grid gap-5 lg:grid-cols-[320px_1fr]">
@@ -1762,34 +2281,63 @@ function renderHistory(view) {
         <div class="flex items-center justify-between gap-4">
           <div>
             <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Point History</p>
-            <h3 class="mt-2 text-xl font-semibold text-white">${set ? getSetLabel(set) : "Set 1"}${game ? ` · ${game.isSuperTiebreak ? "Match Tiebreak" : `Game ${game.index + 1}`}` : ""}</h3>
+            <h3 class="mt-2 text-xl font-semibold text-white">${state.history.showFlaggedOnly ? "Flagged Points" : `${set ? getSetLabel(set) : "Set 1"}${game ? ` · ${game.isSuperTiebreak ? "Match Tiebreak" : `Game ${game.index + 1}`}` : ""}`}</h3>
           </div>
-          ${game ? `<span class="rounded-full bg-white/5 px-4 py-2 text-sm text-court-200/70">${game.isSuperTiebreak ? "Super Tiebreak" : game.isTiebreak ? "Tiebreak" : "Standard game"}</span>` : ""}
+          <div class="flex items-center gap-2">
+            <button data-action="history-toggle-flagged-only" class="rounded-full border px-4 py-2 text-sm ${
+              state.history.showFlaggedOnly
+                ? "border-amber-400/40 bg-amber-400/15 text-amber-200"
+                : "border-white/10 bg-white/5 text-court-200/70"
+            }">Show flagged only</button>
+            ${!state.history.showFlaggedOnly && game ? `<span class="rounded-full bg-white/5 px-4 py-2 text-sm text-court-200/70">${game.isSuperTiebreak ? "Super Tiebreak" : game.isTiebreak ? "Tiebreak" : "Standard game"}</span>` : ""}
+          </div>
         </div>
         <div class="mt-5 space-y-3">
           ${
-            game?.points.length
-              ? game.points
+            historyEntries.length
+              ? historyEntries
                   .map(
-                    (point) => `
-                    <article class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    (entry) => entry.type === "checkpoint"
+                      ? `
+                    <article class="rounded-2xl border border-sky-400/30 bg-sky-400/10 p-4">
                       <div class="flex items-start justify-between gap-4">
                         <div>
-                          <p class="font-semibold text-white">Point ${point.pointNumber} · ${playerName(match, point.winner)} won</p>
-                          <p class="mt-1 text-sm text-court-200/65">${pointDescription(point)}</p>
-                          <p class="mt-2 text-sm text-court-200/65">Score ${Array.isArray(point.scoreBefore) ? point.scoreBefore.join("-") : point.scoreBefore} → ${Array.isArray(point.scoreAfter) ? point.scoreAfter.join("-") : point.scoreAfter}</p>
-                          <p class="mt-2 text-sm text-court-200/55">${playerName(match, point.server)} served${point.isBreakPoint ? " · Break point" : ""}${point.returnWinnerPlayers.length ? ` · Return winner: ${formatPlayerList(match, point.returnWinnerPlayers)}` : ""}${point.netApproachPlayers.length ? ` · Net: ${formatPlayerList(match, point.netApproachPlayers)}` : ""}</p>
+                          <p class="font-semibold text-white">Score Adjustment</p>
+                          <p class="mt-1 text-sm text-court-200/70">Adjusted to set ${entry.setScore[0]}-${entry.setScore[1]} · game ${entry.gameScore[0]}-${entry.gameScore[1]} · ${playerName(match, entry.server)} serving</p>
+                          <p class="mt-2 text-sm text-court-200/55">${entry.isSuperTiebreak ? "Super tiebreak checkpoint" : entry.isTiebreak ? "Tiebreak checkpoint" : "Standard game checkpoint"}</p>
                         </div>
                         <div class="flex gap-2">
-                          <button data-action="edit-point" data-id="${point.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
-                          <button data-action="delete-point" data-id="${point.id}" class="rounded-xl border border-red-400/30 px-3 py-2 text-sm text-red-300">Delete</button>
+                          <button data-action="edit-point" data-id="${entry.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
+                          <button data-action="delete-point" data-id="${entry.id}" class="rounded-xl border border-red-400/30 px-3 py-2 text-sm text-red-300">Delete</button>
+                        </div>
+                      </div>
+                    </article>
+                  `
+                      : `
+                    <article class="rounded-2xl border ${
+                      normalizeFlagged(entry.flagged)
+                        ? "border-amber-400/35 bg-amber-400/10"
+                        : normalizeExcludeFromStats(entry.excludeFromStats)
+                          ? "border-slate-300/25 bg-slate-300/10"
+                          : "border-white/10 bg-white/5"
+                    } p-4">
+                      <div class="flex items-start justify-between gap-4">
+                        <div>
+                          <p class="font-semibold text-white">Point ${entry.pointNumber} · ${playerName(match, entry.winner)} won ${normalizeFlagged(entry.flagged) ? '<span class="ml-2 rounded-full bg-amber-400/20 px-2 py-1 text-xs text-amber-200">Flagged</span>' : ""}${normalizeExcludeFromStats(entry.excludeFromStats) ? '<span class="ml-2 rounded-full bg-slate-300/20 px-2 py-1 text-xs text-slate-100">Excluded</span>' : ""}</p>
+                          <p class="mt-1 text-sm text-court-200/65">${state.history.showFlaggedOnly ? `${getSetLabel(computed.sets.find((setEntry) => setEntry.index === entry.setIndex) || { index: entry.setIndex, isMatchTiebreak: false })} · Game ${entry.gameIndex + 1} · ` : ""}${pointDescription(entry)}</p>
+                          <p class="mt-2 text-sm text-court-200/65">Score ${Array.isArray(entry.scoreBefore) ? entry.scoreBefore.join("-") : entry.scoreBefore} → ${Array.isArray(entry.scoreAfter) ? entry.scoreAfter.join("-") : entry.scoreAfter}</p>
+                          <p class="mt-2 text-sm text-court-200/55">${playerName(match, entry.server)} served${entry.isBreakPoint ? " · Break point" : ""}${entry.returnWinnerPlayers.length ? ` · Return winner: ${formatPlayerList(match, entry.returnWinnerPlayers)}` : ""}${entry.netApproachPlayers.length ? ` · Net: ${formatPlayerList(match, entry.netApproachPlayers)}` : ""}</p>
+                        </div>
+                        <div class="flex gap-2">
+                          <button data-action="edit-point" data-id="${entry.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
+                          <button data-action="delete-point" data-id="${entry.id}" class="rounded-xl border border-red-400/30 px-3 py-2 text-sm text-red-300">Delete</button>
                         </div>
                       </div>
                     </article>
                   `
                   )
                   .join("")
-              : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-court-200/55">No points in this game yet.</div>`
+              : `<div class="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-court-200/55">${state.history.showFlaggedOnly ? "No flagged points yet." : "No points or adjustments in this game yet."}</div>`
           }
         </div>
       </section>
@@ -1808,6 +2356,7 @@ function renderStatsTable(match, stats) {
     ["Double Faults", stats[0].doubleFaults, stats[1].doubleFaults],
     ["Winners", totalShotCount(stats[0].winners), totalShotCount(stats[1].winners)],
     ["Winners FH/BH/V/O/D", shortShotLine(stats[0].winners), shortShotLine(stats[1].winners)],
+    ["Forcing Shots FH/BH/V/O/D", shortShotLine(stats[0].forcingShots), shortShotLine(stats[1].forcingShots)],
     ["Unforced Errors", totalShotCount(stats[0].unforcedErrors), totalShotCount(stats[1].unforcedErrors)],
     ["UFE FH/BH", `${stats[0].unforcedErrors.forehand}/${stats[0].unforcedErrors.backhand}`, `${stats[1].unforcedErrors.forehand}/${stats[1].unforcedErrors.backhand}`],
     ["Forced Errors", stats[0].forcedErrors, stats[1].forcedErrors],
@@ -1815,6 +2364,8 @@ function renderStatsTable(match, stats) {
     ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
     ["Break Points", formatFraction(stats[0].breakPointsConverted, stats[0].breakPointsOpportunities), formatFraction(stats[1].breakPointsConverted, stats[1].breakPointsOpportunities)],
     ["Break Points Saved", formatFraction(stats[0].breakPointsSaved, stats[0].breakPointsFaced), formatFraction(stats[1].breakPointsSaved, stats[1].breakPointsFaced)],
+    ["Short Rally Points Won", formatCountPercent(stats[0].shortRallyPointsWon, stats[0].shortRallyPointsPlayed), formatCountPercent(stats[1].shortRallyPointsWon, stats[1].shortRallyPointsPlayed)],
+    ["Long Rally Points Won", formatCountPercent(stats[0].longRallyPointsWon, stats[0].longRallyPointsPlayed), formatCountPercent(stats[1].longRallyPointsWon, stats[1].longRallyPointsPlayed)],
     ["Total Points Won", stats[0].totalPointsWon, stats[1].totalPointsWon],
   ];
   return `
@@ -1845,9 +2396,21 @@ function shortShotLine(bucket) {
   return `${bucket.forehand}/${bucket.backhand}/${bucket.volley}/${bucket.overhead}/${bucket.drop_shot}`;
 }
 
+function formatCountPercent(count, total) {
+  return `${count} (${formatPercent(count, total)})`;
+}
+
 function pointDescription(point) {
   const shotType = normalizeShotType(point.shotType);
-  return [serveLabel(point.serveResult), point.outcome ? outcomeLabel(point.outcome) : "", shotType ? shotLabel(shotType) : ""]
+  const forcingShotType = normalizeShotType(point.forcingShotType);
+  const rallyLength = normalizeRallyLength(point.rallyLength);
+  return [
+    serveLabel(point.serveResult),
+    point.outcome ? outcomeLabel(point.outcome) : "",
+    shotType ? shotLabel(shotType) : "",
+    point.outcome === "forced_error" && forcingShotType ? `Forced by: ${shotLabel(forcingShotType)}` : "",
+    rallyLength ? `Rally: ${rallyLength === "short" ? "Short (1-4)" : "Long (5+)"}` : "",
+  ]
     .filter(Boolean)
     .join(" · ");
 }
@@ -1934,10 +2497,10 @@ function renderMatches() {
 }
 
 function renderEditorModal(view) {
-  if (!state.editor.pointId) {
+  if (!state.editor.entryId) {
     return "";
   }
-  const point = flattenPoints(view.computed).find((entry) => entry.id === state.editor.pointId);
+  const point = flattenPoints(view.computed).find((entry) => entry.id === state.editor.entryId);
   return `
     <div class="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
       <div class="max-h-[95vh] w-full max-w-3xl overflow-auto rounded-[2rem] border border-white/10 bg-court-950 p-4">
@@ -1949,6 +2512,85 @@ function renderEditorModal(view) {
           <button data-action="close-editor" class="rounded-xl border border-white/10 px-4 py-3 text-sm text-court-100">Close</button>
         </div>
         ${renderPointComposer(view.match, view.computed, state.editor.draft, "edit", point ? { server: point.server, receiver: point.receiver } : null)}
+      </div>
+    </div>
+  `;
+}
+
+function renderAdjustScoreModal(view) {
+  if (!state.adjustment.open) {
+    return "";
+  }
+  const { match } = view;
+  const draft = state.adjustment.draft;
+  const standardOptions = ["0", "15", "30", "40", "Ad"];
+  const title = state.adjustment.editId ? "Edit Score Adjustment" : "Adjust Score";
+
+  return `
+    <div class="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
+      <div class="max-h-[95vh] w-full max-w-2xl overflow-auto rounded-[2rem] border border-white/10 bg-court-950 p-5">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">${title}</p>
+            <p class="mt-2 text-sm text-court-200/60">Insert a checkpoint that forces the score and server from this point forward.</p>
+          </div>
+          <button data-action="close-adjust-score" class="rounded-xl border border-white/10 px-4 py-3 text-sm text-court-100">Close</button>
+        </div>
+        <div class="mt-5 space-y-5">
+          <div>
+            <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Current Set Score</p>
+            <div class="grid grid-cols-2 gap-3">
+              ${[0, 1].map((playerIndex) => `
+                <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <span class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</span>
+                  <input data-action="adjust-set-score" data-player="${playerIndex}" type="number" min="0" max="7" value="${escapeHtml(draft.setScore[playerIndex])}" class="mt-3 w-full bg-transparent font-mono text-2xl text-white outline-none" />
+                </label>
+              `).join("")}
+            </div>
+          </div>
+          <div>
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Current Game Score</p>
+              <button data-action="toggle-adjust-tiebreak" class="rounded-full border px-4 py-2 text-sm ${
+                draft.isTiebreak
+                  ? "border-court-300/40 bg-court-300/10 text-court-100"
+                  : "border-white/10 bg-white/5 text-court-200/70"
+              }">${draft.isTiebreak ? "Tiebreak Mode" : "Standard Mode"}</button>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              ${[0, 1].map((playerIndex) => `
+                <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <span class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</span>
+                  ${
+                    draft.isTiebreak
+                      ? `<input data-action="adjust-game-score" data-player="${playerIndex}" type="number" min="0" value="${escapeHtml(draft.gameScore[playerIndex])}" class="mt-3 w-full bg-transparent font-mono text-2xl text-white outline-none" />`
+                      : `<select data-action="adjust-standard-score" data-player="${playerIndex}" class="mt-3 w-full rounded-xl border border-white/10 bg-court-950/70 px-3 py-3 text-white outline-none">
+                          ${standardOptions.map((option) => `<option value="${option}" ${draft.gameScore[playerIndex] === option ? "selected" : ""}>${option}</option>`).join("")}
+                        </select>`
+                  }
+                </label>
+              `).join("")}
+            </div>
+          </div>
+          <div>
+            <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Is Serving?</p>
+            <div class="grid grid-cols-2 gap-3">
+              ${[0, 1].map((playerIndex) => `
+                <button data-action="adjust-server" data-value="${playerIndex}" class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+                  draft.server === String(playerIndex)
+                    ? "border-court-300 bg-court-300 text-court-950"
+                    : "border-white/10 bg-white/5 text-court-100"
+                }">
+                  ${escapeHtml(playerName(match, playerIndex))}
+                </button>
+              `).join("")}
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <button data-action="close-adjust-score" class="rounded-2xl border border-white/10 px-5 py-4 text-sm text-court-100">Cancel</button>
+            <button data-action="apply-adjust-score" class="rounded-2xl bg-court-300 px-5 py-4 text-sm font-semibold text-court-950">Apply</button>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -2008,7 +2650,7 @@ function render() {
                 : renderMatches()
         }
       </div>
-      ${hasMatch ? renderEditorModal(view) : ""}
+      ${hasMatch ? `${renderEditorModal(view)}${renderAdjustScoreModal(view)}` : ""}
     `;
   app.innerHTML = body;
 }
@@ -2052,7 +2694,15 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "draft-shot") {
-    setDraftValue("draft", "shotType", target.dataset.value);
+    toggleOptionalChoice("draft", "shotType", target.dataset.value);
+    return;
+  }
+  if (action === "draft-forcing-shot") {
+    toggleOptionalChoice("draft", "forcingShotType", target.dataset.value);
+    return;
+  }
+  if (action === "draft-rally") {
+    toggleOptionalChoice("draft", "rallyLength", target.dataset.value);
     return;
   }
   if (action === "draft-winner") {
@@ -2068,6 +2718,10 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (action === "draft-toggle-boolean") {
+    setDraftValue("draft", target.dataset.key, !state.draft[target.dataset.key]);
+    return;
+  }
   if (action === "edit-serve") {
     updateEditorDraft("serveResult", target.dataset.value);
     return;
@@ -2077,7 +2731,15 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "edit-shot") {
-    updateEditorDraft("shotType", target.dataset.value);
+    toggleEditorOptionalChoice("shotType", target.dataset.value);
+    return;
+  }
+  if (action === "edit-forcing-shot") {
+    toggleEditorOptionalChoice("forcingShotType", target.dataset.value);
+    return;
+  }
+  if (action === "edit-rally") {
+    toggleEditorOptionalChoice("rallyLength", target.dataset.value);
     return;
   }
   if (action === "edit-winner") {
@@ -2095,8 +2757,17 @@ document.addEventListener("click", async (event) => {
     );
     return;
   }
+  if (action === "edit-toggle-boolean") {
+    updateEditorDraft(target.dataset.key, !state.editor.draft[target.dataset.key]);
+    return;
+  }
   if (action === "history-game") {
     setHistoryFocus(Number(target.dataset.set), Number(target.dataset.game));
+    return;
+  }
+  if (action === "history-toggle-flagged-only") {
+    state.history.showFlaggedOnly = !state.history.showFlaggedOnly;
+    render();
     return;
   }
   if (action === "edit-point") {
@@ -2134,6 +2805,26 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "export") {
     await exportMatch(target.dataset.kind);
+    return;
+  }
+  if (action === "open-adjust-score") {
+    openAdjustmentModal();
+    return;
+  }
+  if (action === "close-adjust-score") {
+    closeAdjustmentModal();
+    return;
+  }
+  if (action === "apply-adjust-score") {
+    await applyCheckpointDraft();
+    return;
+  }
+  if (action === "adjust-server") {
+    updateAdjustmentDraft("server", target.dataset.value);
+    return;
+  }
+  if (action === "toggle-adjust-tiebreak") {
+    updateAdjustmentDraft("isTiebreak", !state.adjustment.draft.isTiebreak);
   }
 });
 
@@ -2150,7 +2841,21 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", async (event) => {
   const target = event.target;
+  if (target instanceof HTMLSelectElement && target.dataset.action === "adjust-standard-score") {
+    updateAdjustmentScore("gameScore", Number(target.dataset.player), target.value);
+    return;
+  }
   if (!(target instanceof HTMLInputElement) || target.id !== "match-import-input") {
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
+    if (target.dataset.action === "adjust-set-score") {
+      updateAdjustmentScore("setScore", Number(target.dataset.player), target.value);
+      return;
+    }
+    if (target.dataset.action === "adjust-game-score") {
+      updateAdjustmentScore("gameScore", Number(target.dataset.player), target.value);
+    }
     return;
   }
 
