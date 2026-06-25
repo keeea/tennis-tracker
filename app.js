@@ -11,14 +11,15 @@ const SERVE_OPTIONS = [
 ];
 const OUTCOME_OPTIONS = [
   { value: "winner", label: "Winner" },
-  { value: "unforced_error", label: "Unforced Error" },
-  { value: "forced_error", label: "Forced Error" },
+  { value: "unforced_error", label: "UE" },
+  { value: "forced_error", label: "FE" },
   { value: "uncertain", label: "Uncertain" },
 ];
 const SHOT_OPTIONS = ["forehand", "backhand", "volley", "overhead", "drop_shot"];
 const RALLY_LENGTH_OPTIONS = [
   { value: "short", label: "Short (1-4)" },
   { value: "long", label: "Long (5+)" },
+  { value: "uncertain", label: "Uncertain" },
 ];
 const TABS = ["live", "history", "stats", "matches"];
 const STORAGE_KEY = "tennisTracker.activeMatchId";
@@ -63,15 +64,15 @@ let noticeTimeoutId = 0;
 function createEmptyDraft() {
   return {
     serveResult: "",
-    outcome: "",
-    shotType: "",
-    forcingShotType: "",
-    rallyLength: "",
+    outcome: "uncertain",
+    resultShotType: "uncertain",
+    precedingShotType: "uncertain",
+    rallyLength: "uncertain",
     winner: "",
     flagged: false,
     excludeFromStats: false,
-    netApproachStates: createEmptyFlagStates(),
-    returnWinnerStates: createEmptyFlagStates(),
+    netApproachStates: createEmptyTriStates(),
+    returnWinnerStates: createEmptyTriStates(),
   };
 }
 
@@ -84,8 +85,8 @@ function createEmptyCheckpointDraft() {
   };
 }
 
-function createEmptyFlagStates() {
-  return { 0: "", 1: "" };
+function createEmptyTriStates() {
+  return [null, null];
 }
 
 function createStatsBucket() {
@@ -100,7 +101,7 @@ function createStatsBucket() {
     secondServePointsWon: 0,
     aces: 0,
     doubleFaults: 0,
-    winners: {
+    resultShots: {
       forehand: 0,
       backhand: 0,
       volley: 0,
@@ -115,6 +116,20 @@ function createStatsBucket() {
       drop_shot: 0,
     },
     unforcedErrors: {
+      forehand: 0,
+      backhand: 0,
+      volley: 0,
+      overhead: 0,
+      drop_shot: 0,
+    },
+    errorsAfterOpponentShot: {
+      forehand: 0,
+      backhand: 0,
+      volley: 0,
+      overhead: 0,
+      drop_shot: 0,
+    },
+    winnersAfterOpponentShot: {
       forehand: 0,
       backhand: 0,
       volley: 0,
@@ -285,31 +300,23 @@ function sanitizePlayerIndexes(value) {
   return [...new Set(value.map((entry) => Number(entry)).filter((entry) => entry === 0 || entry === 1))];
 }
 
-function sanitizeFlagStates(value) {
-  const next = createEmptyFlagStates();
-  if (!value || typeof value !== "object") {
-    return next;
+function sanitizeTriStates(value) {
+  const next = createEmptyTriStates();
+  if (Array.isArray(value)) {
+    return value.slice(0, 2).map((entry, index) => (entry === 0 || entry === 1 ? entry : next[index]));
   }
-  ["0", "1"].forEach((playerIndex) => {
-    if (value[playerIndex] === "yes" || value[playerIndex] === "no") {
-      next[playerIndex] = value[playerIndex];
-    }
-  });
-  return next;
-}
-
-function flagStatesToPlayers(flagStates) {
-  const sanitized = sanitizeFlagStates(flagStates);
-  return Object.entries(sanitized)
-    .filter(([, stateValue]) => stateValue === "yes")
-    .map(([playerIndex]) => Number(playerIndex));
-}
-
-function playersToFlagStates(players) {
-  const next = createEmptyFlagStates();
-  sanitizePlayerIndexes(players).forEach((playerIndex) => {
-    next[playerIndex] = "yes";
-  });
+  if (value && typeof value === "object") {
+    ["0", "1"].forEach((playerIndex) => {
+      const raw = value[playerIndex];
+      if (raw === 1 || raw === 0 || raw === null) {
+        next[Number(playerIndex)] = raw;
+      } else if (raw === "yes") {
+        next[Number(playerIndex)] = 1;
+      } else if (raw === "no") {
+        next[Number(playerIndex)] = 0;
+      }
+    });
+  }
   return next;
 }
 
@@ -318,11 +325,15 @@ function normalizeWinner(value) {
 }
 
 function normalizeShotType(value) {
-  return SHOT_OPTIONS.includes(value) ? value : "";
+  return SHOT_OPTIONS.includes(value) ? value : "uncertain";
 }
 
 function normalizeRallyLength(value) {
-  return value === "short" || value === "long" ? value : "";
+  return value === "short" || value === "long" ? value : "uncertain";
+}
+
+function normalizeOutcome(value) {
+  return OUTCOME_OPTIONS.some((option) => option.value === value) ? value : "uncertain";
 }
 
 function normalizeFlagged(value) {
@@ -331,6 +342,42 @@ function normalizeFlagged(value) {
 
 function normalizeExcludeFromStats(value) {
   return value === true;
+}
+
+function normalizeRequiredServeResult(value) {
+  return SERVE_OPTIONS.some((option) => option.value === value) ? value : "";
+}
+
+function triStatesToPlayerIndexes(triStates) {
+  return sanitizeTriStates(triStates).map((value) => (value === 0 || value === 1 ? value : null));
+}
+
+function sumShots(bucket) {
+  return Object.values(bucket).reduce((sum, count) => sum + count, 0);
+}
+
+function deriveShotPlayers(winner, outcome) {
+  if (winner !== 0 && winner !== 1) {
+    return { loser: null, resultShotPlayer: null, precedingShotPlayer: null };
+  }
+  const loser = 1 - winner;
+  if (outcome === "winner") {
+    return { loser, resultShotPlayer: winner, precedingShotPlayer: loser };
+  }
+  if (outcome === "unforced_error" || outcome === "forced_error") {
+    return { loser, resultShotPlayer: loser, precedingShotPlayer: winner };
+  }
+  return { loser, resultShotPlayer: null, precedingShotPlayer: null };
+}
+
+function pointWinnerFromServeResult(serveResult, server) {
+  if (serveResult === "ace") {
+    return server;
+  }
+  if (serveResult === "double_fault") {
+    return 1 - server;
+  }
+  return null;
 }
 
 function isCheckpointEntry(entry) {
@@ -373,32 +420,41 @@ function checkpointGameIndex(currentSet, currentGame) {
   return Math.max(currentSet.games.length - 1, 0);
 }
 
-function resolveNetApproachPlayers(rawPoint, winner, loser, server, receiver) {
-  const explicit = sanitizePlayerIndexes(rawPoint.netApproachPlayers);
-  if (explicit.length) {
-    return explicit;
+function resolveLegacyTriStates(rawPoint, kind, winner, loser, server, receiver) {
+  const states = createEmptyTriStates();
+  const explicitKey = kind === "net" ? "netApproachStates" : "returnWinnerStates";
+  const explicitStates = sanitizeTriStates(rawPoint[explicitKey]);
+  if (explicitStates.some((value) => value !== null)) {
+    return explicitStates;
   }
-  if (!rawPoint.netApproach) {
-    return [];
-  }
-  if (rawPoint.netPlayerMode === "loser") {
-    return [loser];
-  }
-  if (rawPoint.netPlayerMode === "server") {
-    return [server];
-  }
-  if (rawPoint.netPlayerMode === "receiver") {
-    return [receiver];
-  }
-  return [winner];
-}
 
-function resolveReturnWinnerPlayers(rawPoint, receiver) {
-  const explicit = sanitizePlayerIndexes(rawPoint.returnWinnerPlayers);
-  if (explicit.length) {
-    return explicit;
+  const players = sanitizePlayerIndexes(kind === "net" ? rawPoint.netApproachPlayers : rawPoint.returnWinnerPlayers);
+  if (players.length) {
+    players.forEach((playerIndex) => {
+      states[playerIndex] = 1;
+    });
+    return states;
   }
-  return rawPoint.returnWinner && rawPoint.outcome === "winner" ? [receiver] : [];
+
+  if (kind === "net") {
+    if (!rawPoint.netApproach) {
+      return states;
+    }
+    const playerIndex = rawPoint.netPlayerMode === "loser"
+      ? loser
+      : rawPoint.netPlayerMode === "server"
+        ? server
+        : rawPoint.netPlayerMode === "receiver"
+          ? receiver
+          : winner;
+    states[playerIndex] = 1;
+    return states;
+  }
+
+  if (rawPoint.returnWinner && rawPoint.outcome === "winner") {
+    states[receiver] = 1;
+  }
+  return states;
 }
 
 function formatPlayerList(match, playerIndexes) {
@@ -412,6 +468,27 @@ function ensureSetBucket(statsBySet, setIndex) {
     statsBySet[setIndex] = [createStatsBucket(), createStatsBucket()];
   }
   return statsBySet[setIndex];
+}
+
+function normalizeStoredPoint(rawPoint) {
+  const winner = normalizeWinner(Number(rawPoint.winner));
+  const migratedResultShot = rawPoint.resultShotType ?? rawPoint.shotType;
+  const migratedPrecedingShot = rawPoint.precedingShotType ?? rawPoint.forcingShotType;
+  return {
+    id: typeof rawPoint.id === "string" && rawPoint.id ? rawPoint.id : crypto.randomUUID(),
+    type: "point",
+    serveResult: normalizeRequiredServeResult(rawPoint.serveResult),
+    outcome: normalizeOutcome(rawPoint.outcome),
+    resultShotType: normalizeShotType(migratedResultShot),
+    precedingShotType: normalizeShotType(migratedPrecedingShot),
+    rallyLength: normalizeRallyLength(rawPoint.rallyLength),
+    winner,
+    flagged: normalizeFlagged(rawPoint.flagged),
+    excludeFromStats: normalizeExcludeFromStats(rawPoint.excludeFromStats),
+    netApproachStates: sanitizeTriStates(rawPoint.netApproachStates),
+    returnWinnerStates: sanitizeTriStates(rawPoint.returnWinnerStates),
+    timestamp: typeof rawPoint.timestamp === "string" && rawPoint.timestamp ? rawPoint.timestamp : new Date().toISOString(),
+  };
 }
 
 function computeMatch(match) {
@@ -569,7 +646,8 @@ function computeMatch(match) {
       ? getTiebreakServer(currentGame.server, pointInGame)
       : currentGame.server;
     const receiver = 1 - server;
-    const winner = normalizeWinner(Number(rawEntry.winner));
+    const normalizedPoint = normalizeStoredPoint(rawEntry);
+    const winner = normalizedPoint.winner;
     if (winner === null) {
       return;
     }
@@ -578,14 +656,13 @@ function computeMatch(match) {
     const scoreBeforeGamePoint = currentGame.isTiebreak
       ? [...currentGame.pointsWon]
       : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1]);
-    const netApproachPlayers = resolveNetApproachPlayers(rawEntry, winner, loser, server, receiver);
-    const returnWinnerPlayers = resolveReturnWinnerPlayers(rawEntry, receiver);
-    const shotType = normalizeShotType(rawEntry.shotType);
-    const forcingShotType = normalizeShotType(rawEntry.forcingShotType);
-    const rallyLength = normalizeRallyLength(rawEntry.rallyLength);
+    const netApproachStates = resolveLegacyTriStates(rawEntry, "net", winner, loser, server, receiver);
+    const returnWinnerStates = resolveLegacyTriStates(rawEntry, "return", winner, loser, server, receiver);
+    const { outcome, resultShotType, precedingShotType, rallyLength } = normalizedPoint;
+    const { resultShotPlayer, precedingShotPlayer } = deriveShotPlayers(winner, outcome);
     const setBuckets = ensureSetBucket(statsBySet, currentSet.index);
-    const flagged = normalizeFlagged(rawEntry.flagged);
-    const excludeFromStats = normalizeExcludeFromStats(rawEntry.excludeFromStats);
+    const flagged = normalizedPoint.flagged;
+    const excludeFromStats = normalizedPoint.excludeFromStats;
 
     if (flagged) {
       flaggedPoints += 1;
@@ -598,56 +675,65 @@ function computeMatch(match) {
         bucketGroup[receiver].returnPoints += 1;
         bucketGroup[server].firstServeAttempts += 1;
 
-        if (rawEntry.serveResult === "first_in" || rawEntry.serveResult === "ace") {
+        if (normalizedPoint.serveResult === "first_in" || normalizedPoint.serveResult === "ace") {
           bucketGroup[server].firstServeIn += 1;
           if (winner === server) {
             bucketGroup[server].firstServePointsWon += 1;
           }
         }
 
-        if (rawEntry.serveResult === "second_in" || rawEntry.serveResult === "double_fault") {
+        if (normalizedPoint.serveResult === "second_in" || normalizedPoint.serveResult === "double_fault") {
           bucketGroup[server].secondServeAttempts += 1;
         }
 
-        if (rawEntry.serveResult === "second_in") {
+        if (normalizedPoint.serveResult === "second_in") {
           bucketGroup[server].secondServeIn += 1;
           if (winner === server) {
             bucketGroup[server].secondServePointsWon += 1;
           }
         }
 
-        if (rawEntry.serveResult === "ace") {
+        if (normalizedPoint.serveResult === "ace") {
           bucketGroup[server].aces += 1;
         }
 
-        if (rawEntry.serveResult === "double_fault") {
+        if (normalizedPoint.serveResult === "double_fault") {
           bucketGroup[server].doubleFaults += 1;
         }
 
-        if (rawEntry.outcome === "winner" && shotType && bucketGroup[winner].winners[shotType] !== undefined) {
-          bucketGroup[winner].winners[shotType] += 1;
+        if (outcome === "winner" && resultShotType !== "uncertain") {
+          bucketGroup[winner].resultShots[resultShotType] += 1;
         }
 
-        if (rawEntry.outcome === "unforced_error" && shotType && bucketGroup[loser].unforcedErrors[shotType] !== undefined) {
-          bucketGroup[loser].unforcedErrors[shotType] += 1;
+        if (outcome === "unforced_error" && resultShotType !== "uncertain" && resultShotPlayer !== null) {
+          bucketGroup[resultShotPlayer].unforcedErrors[resultShotType] += 1;
         }
 
-        if (rawEntry.outcome === "forced_error") {
+        if (outcome === "forced_error") {
           bucketGroup[loser].forcedErrors += 1;
-          if (forcingShotType && bucketGroup[winner].forcingShots[forcingShotType] !== undefined) {
-            bucketGroup[winner].forcingShots[forcingShotType] += 1;
+          if (precedingShotType !== "uncertain" && precedingShotPlayer !== null) {
+            bucketGroup[precedingShotPlayer].forcingShots[precedingShotType] += 1;
           }
         }
 
-        netApproachPlayers.forEach((playerIndex) => {
-          bucketGroup[playerIndex].netPointsPlayed += 1;
-          if (winner === playerIndex) {
-            bucketGroup[playerIndex].netPointsWon += 1;
+        if (outcome !== "uncertain" && precedingShotType !== "uncertain") {
+          if (outcome === "winner") {
+            bucketGroup[winner].winnersAfterOpponentShot[precedingShotType] += 1;
+          } else {
+            bucketGroup[loser].errorsAfterOpponentShot[precedingShotType] += 1;
           }
-        });
+        }
 
-        returnWinnerPlayers.forEach((playerIndex) => {
-          bucketGroup[playerIndex].returnWinners += 1;
+        [0, 1].forEach((playerIndex) => {
+          if (netApproachStates[playerIndex] === 1 || netApproachStates[playerIndex] === 0) {
+            bucketGroup[playerIndex].netPointsPlayed += 1;
+            if (netApproachStates[playerIndex] === 1 && winner === playerIndex) {
+              bucketGroup[playerIndex].netPointsWon += 1;
+            }
+          }
+          if (returnWinnerStates[playerIndex] === 1) {
+            bucketGroup[playerIndex].returnWinners += 1;
+          }
         });
 
         if (rallyLength === "short") {
@@ -690,8 +776,7 @@ function computeMatch(match) {
     }
 
     currentGame.points.push({
-      id: rawEntry.id,
-      ...rawEntry,
+      ...normalizedPoint,
       type: "point",
       rawIndex: pointListIndex,
       setIndex: currentSet.index,
@@ -704,12 +789,12 @@ function computeMatch(match) {
       scoreBefore: scoreBeforeGamePoint,
       scoreAfter: scoreAfterGamePoint,
       isBreakPoint: isBreakChance,
-      shotType,
-      netApproachPlayers,
-      returnWinnerPlayers,
+      resultShotPlayer,
+      precedingShotPlayer,
       flagged,
       excludeFromStats,
-      forcingShotType,
+      netApproachStates,
+      returnWinnerStates,
       rallyLength,
     });
 
@@ -884,17 +969,15 @@ function encodeDataForExport(match) {
           id: entry.id,
           type: "point",
           serveResult: entry.serveResult,
-          outcome: entry.outcome || "",
-          shotType: normalizeShotType(entry.shotType),
-          forcingShotType: normalizeShotType(entry.forcingShotType),
+          outcome: normalizeOutcome(entry.outcome),
+          resultShotType: normalizeShotType(entry.resultShotType ?? entry.shotType),
+          precedingShotType: normalizeShotType(entry.precedingShotType ?? entry.forcingShotType),
           rallyLength: normalizeRallyLength(entry.rallyLength),
           winner: Number(entry.winner),
           flagged: normalizeFlagged(entry.flagged),
           excludeFromStats: normalizeExcludeFromStats(entry.excludeFromStats),
-          netApproach: Boolean(entry.netApproach),
-          netApproachPlayers: sanitizePlayerIndexes(entry.netApproachPlayers),
-          returnWinner: Boolean(entry.returnWinner),
-          returnWinnerPlayers: sanitizePlayerIndexes(entry.returnWinnerPlayers),
+          netApproachStates: sanitizeTriStates(entry.netApproachStates),
+          returnWinnerStates: sanitizeTriStates(entry.returnWinnerStates),
           timestamp: entry.timestamp,
         }
     )),
@@ -926,13 +1009,11 @@ function encodeDataForExport(match) {
           scoreAfter: point.scoreAfter,
           serveResult: point.serveResult,
           outcome: point.outcome,
-          shotType: normalizeShotType(point.shotType),
-          forcingShotType: normalizeShotType(point.forcingShotType),
+          resultShotType: normalizeShotType(point.resultShotType),
+          precedingShotType: normalizeShotType(point.precedingShotType),
           rallyLength: normalizeRallyLength(point.rallyLength),
-          netApproach: point.netApproach,
-          netApproachPlayers: point.netApproachPlayers.map((index) => playerName(match, index)),
-          returnWinner: point.returnWinner,
-          returnWinnerPlayers: point.returnWinnerPlayers.map((index) => playerName(match, index)),
+          netApproachStates: point.netApproachStates.map((value) => (value === null ? "uncertain" : value === 1 ? "yes" : "no")),
+          returnWinnerStates: point.returnWinnerStates.map((value) => (value === null ? "uncertain" : value === 1 ? "yes" : "no")),
           isBreakPoint: point.isBreakPoint,
           flagged: normalizeFlagged(point.flagged),
           excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
@@ -957,16 +1038,16 @@ function makeCsv(match) {
       "winner",
       "serve_result",
       "outcome",
-      "shot_type",
-      "forcing_shot_type",
+      "result_shot_type",
+      "preceding_shot_type",
       "rally_length",
       "score_before",
       "score_after",
       "break_point",
-      "net_approach",
-      "net_players",
-      "return_winner",
-      "return_winner_players",
+      "net_player_a",
+      "net_player_b",
+      "return_winner_player_a",
+      "return_winner_player_b",
       "flagged",
       "exclude_from_stats",
     ],
@@ -985,16 +1066,16 @@ function makeCsv(match) {
           playerName(match, point.winner),
           point.serveResult,
           point.outcome,
-          normalizeShotType(point.shotType),
-          normalizeShotType(point.forcingShotType),
+          normalizeShotType(point.resultShotType),
+          normalizeShotType(point.precedingShotType),
           normalizeRallyLength(point.rallyLength),
           Array.isArray(point.scoreBefore) ? point.scoreBefore.join("-") : point.scoreBefore,
           Array.isArray(point.scoreAfter) ? point.scoreAfter.join("-") : point.scoreAfter,
           point.isBreakPoint ? "yes" : "no",
-          point.netApproachPlayers.length ? "yes" : "no",
-          formatPlayerList(match, point.netApproachPlayers),
-          point.returnWinnerPlayers.length ? "yes" : "no",
-          formatPlayerList(match, point.returnWinnerPlayers),
+          point.netApproachStates[0] === null ? "uncertain" : point.netApproachStates[0] === 1 ? "yes" : "no",
+          point.netApproachStates[1] === null ? "uncertain" : point.netApproachStates[1] === 1 ? "yes" : "no",
+          point.returnWinnerStates[0] === null ? "uncertain" : point.returnWinnerStates[0] === 1 ? "yes" : "no",
+          point.returnWinnerStates[1] === null ? "uncertain" : point.returnWinnerStates[1] === 1 ? "yes" : "no",
           normalizeFlagged(point.flagged) ? "yes" : "no",
           normalizeExcludeFromStats(point.excludeFromStats) ? "yes" : "no",
         ]);
@@ -1045,33 +1126,45 @@ function validateImportedPoint(point) {
   if (winner !== 0 && winner !== 1) {
     throw new Error("Imported point has an invalid winner.");
   }
-  if (point.outcome !== "" && !OUTCOME_OPTIONS.some((option) => option.value === point.outcome)) {
+  if (point.outcome !== undefined && !OUTCOME_OPTIONS.some((option) => option.value === point.outcome)) {
     throw new Error("Imported point has an invalid outcome.");
   }
-  if (point.shotType !== "" && point.shotType !== undefined && !SHOT_OPTIONS.includes(point.shotType)) {
-    throw new Error("Imported point has an invalid shot type.");
+  const resultShotType = point.resultShotType ?? point.shotType;
+  const precedingShotType = point.precedingShotType ?? point.forcingShotType;
+  if (resultShotType !== "uncertain" && resultShotType !== "" && resultShotType !== undefined && !SHOT_OPTIONS.includes(resultShotType)) {
+    throw new Error("Imported point has an invalid result shot type.");
   }
-  if (point.forcingShotType !== "" && point.forcingShotType !== undefined && !SHOT_OPTIONS.includes(point.forcingShotType)) {
-    throw new Error("Imported point has an invalid forcing shot type.");
+  if (precedingShotType !== "uncertain" && precedingShotType !== "" && precedingShotType !== undefined && !SHOT_OPTIONS.includes(precedingShotType)) {
+    throw new Error("Imported point has an invalid preceding shot type.");
   }
-  if (point.rallyLength !== "" && point.rallyLength !== undefined && point.rallyLength !== "short" && point.rallyLength !== "long") {
+  if (point.rallyLength !== "" && point.rallyLength !== undefined && point.rallyLength !== "short" && point.rallyLength !== "long" && point.rallyLength !== "uncertain") {
     throw new Error("Imported point has an invalid rally length.");
+  }
+  const netApproachStates = sanitizeTriStates(point.netApproachStates);
+  if (!netApproachStates.some((value) => value !== null)) {
+    sanitizePlayerIndexes(point.netApproachPlayers).forEach((playerIndex) => {
+      netApproachStates[playerIndex] = 1;
+    });
+  }
+  const returnWinnerStates = sanitizeTriStates(point.returnWinnerStates);
+  if (!returnWinnerStates.some((value) => value !== null)) {
+    sanitizePlayerIndexes(point.returnWinnerPlayers).forEach((playerIndex) => {
+      returnWinnerStates[playerIndex] = 1;
+    });
   }
   return {
     id: crypto.randomUUID(),
     type: "point",
     serveResult: point.serveResult,
-    outcome: point.outcome || "",
-    shotType: normalizeShotType(point.shotType),
-    forcingShotType: normalizeShotType(point.forcingShotType),
+    outcome: normalizeOutcome(point.outcome),
+    resultShotType: normalizeShotType(resultShotType),
+    precedingShotType: normalizeShotType(precedingShotType),
     rallyLength: normalizeRallyLength(point.rallyLength),
     winner,
     flagged: normalizeFlagged(point.flagged),
     excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
-    netApproach: Boolean(point.netApproach),
-    netApproachPlayers: sanitizePlayerIndexes(point.netApproachPlayers),
-    returnWinner: Boolean(point.returnWinner),
-    returnWinnerPlayers: sanitizePlayerIndexes(point.returnWinnerPlayers),
+    netApproachStates,
+    returnWinnerStates,
     timestamp: typeof point.timestamp === "string" && point.timestamp ? point.timestamp : new Date().toISOString(),
   };
 }
@@ -1225,31 +1318,25 @@ function importMatchFromJson(text) {
           id: point.id || crypto.randomUUID(),
           type: "point",
           serveResult: point.serveResult,
-          outcome: point.outcome || "",
-          shotType: point.shotType || "",
-          forcingShotType: point.forcingShotType || "",
-          rallyLength: point.rallyLength || "",
+          outcome: point.outcome || "uncertain",
+          resultShotType: point.resultShotType || point.shotType || "uncertain",
+          precedingShotType: point.precedingShotType || point.forcingShotType || "uncertain",
+          rallyLength: point.rallyLength || "uncertain",
           winner: playerLookup.get(point.winner),
           flagged: normalizeFlagged(point.flagged),
           excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
-          netApproach: point.netApproach,
-          netApproachPlayers: Array.isArray(point.netApproachPlayers)
-            ? point.netApproachPlayers.map((name) => {
-              if (!playerLookup.has(name)) {
-                throw new Error(`Unknown net approach player "${name}" in JSON import.`);
-              }
-              return playerLookup.get(name);
-            })
-            : [],
-          returnWinner: point.returnWinner,
-          returnWinnerPlayers: Array.isArray(point.returnWinnerPlayers)
-            ? point.returnWinnerPlayers.map((name) => {
-              if (!playerLookup.has(name)) {
-                throw new Error(`Unknown return winner player "${name}" in JSON import.`);
-              }
-              return playerLookup.get(name);
-            })
-            : [],
+          netApproachStates: Array.isArray(point.netApproachStates)
+            ? point.netApproachStates.map((value) => (value === "yes" ? 1 : value === "no" ? 0 : null))
+            : sanitizePlayerIndexes(point.netApproachPlayers).reduce((states, playerIndex) => {
+              states[playerIndex] = 1;
+              return states;
+            }, createEmptyTriStates()),
+          returnWinnerStates: Array.isArray(point.returnWinnerStates)
+            ? point.returnWinnerStates.map((value) => (value === "yes" ? 1 : value === "no" ? 0 : null))
+            : sanitizePlayerIndexes(point.returnWinnerPlayers).reduce((states, playerIndex) => {
+              states[playerIndex] = 1;
+              return states;
+            }, createEmptyTriStates()),
         }));
       });
     });
@@ -1283,6 +1370,29 @@ function importMatchFromCsv(text) {
     "winner",
     "serve_result",
     "outcome",
+    "result_shot_type",
+    "preceding_shot_type",
+    "rally_length",
+    "score_before",
+    "score_after",
+    "break_point",
+    "net_player_a",
+    "net_player_b",
+    "return_winner_player_a",
+    "return_winner_player_b",
+    "flagged",
+    "exclude_from_stats",
+  ];
+  const legacyHeaders = [
+    "set",
+    "game",
+    "point",
+    "tiebreak",
+    "server",
+    "receiver",
+    "winner",
+    "serve_result",
+    "outcome",
     "shot_type",
     "forcing_shot_type",
     "rally_length",
@@ -1296,7 +1406,9 @@ function importMatchFromCsv(text) {
     "flagged",
     "exclude_from_stats",
   ];
-  if (headers.length !== expectedHeaders.length || headers.some((header, index) => header !== expectedHeaders[index])) {
+  const matchesNew = headers.length === expectedHeaders.length && headers.every((header, index) => header === expectedHeaders[index]);
+  const matchesLegacy = headers.length === legacyHeaders.length && headers.every((header, index) => header === legacyHeaders[index]);
+  if (!matchesNew && !matchesLegacy) {
     throw new Error("CSV does not match the exported match format.");
   }
   if (rows.length < 2) {
@@ -1340,14 +1452,28 @@ function importMatchFromCsv(text) {
       id: crypto.randomUUID(),
       serveResult: record.serve_result,
       outcome: record.outcome,
-      shotType: record.shot_type,
-      forcingShotType: record.forcing_shot_type,
+      resultShotType: matchesNew ? record.result_shot_type : record.shot_type,
+      precedingShotType: matchesNew ? record.preceding_shot_type : record.forcing_shot_type,
       rallyLength: record.rally_length,
       winner: playerLookup.get(record.winner.trim()),
-      netApproach: record.net_approach === "yes",
-      netApproachPlayers: parsePlayerList(record.net_players, playerLookup),
-      returnWinner: record.return_winner === "yes",
-      returnWinnerPlayers: parsePlayerList(record.return_winner_players, playerLookup),
+      netApproachStates: matchesNew
+        ? [
+          record.net_player_a === "yes" ? 1 : record.net_player_a === "no" ? 0 : null,
+          record.net_player_b === "yes" ? 1 : record.net_player_b === "no" ? 0 : null,
+        ]
+        : parsePlayerList(record.net_players, playerLookup).reduce((states, playerIndex) => {
+          states[playerIndex] = 1;
+          return states;
+        }, createEmptyTriStates()),
+      returnWinnerStates: matchesNew
+        ? [
+          record.return_winner_player_a === "yes" ? 1 : record.return_winner_player_a === "no" ? 0 : null,
+          record.return_winner_player_b === "yes" ? 1 : record.return_winner_player_b === "no" ? 0 : null,
+        ]
+        : parsePlayerList(record.return_winner_players, playerLookup).reduce((states, playerIndex) => {
+          states[playerIndex] = 1;
+          return states;
+        }, createEmptyTriStates()),
       flagged: record.flagged === "yes",
       excludeFromStats: record.exclude_from_stats === "yes",
     }));
@@ -1459,36 +1585,18 @@ function validatePointDraft(draft, computed) {
     return "Select a serve result.";
   }
   const server = computed.liveServer;
-  const receiver = 1 - server;
-  if (draft.serveResult === "ace") {
-    draft.winner = String(server);
-    draft.outcome = "";
-    draft.shotType = "";
-    draft.forcingShotType = "";
-    draft.netApproachStates = createEmptyFlagStates();
-    draft.returnWinnerStates = createEmptyFlagStates();
-  }
-  if (draft.serveResult === "double_fault") {
-    draft.winner = String(receiver);
-    draft.outcome = "";
-    draft.shotType = "";
-    draft.forcingShotType = "";
-    draft.netApproachStates = createEmptyFlagStates();
-    draft.returnWinnerStates = createEmptyFlagStates();
-  }
-  if (draft.serveResult !== "ace" && draft.serveResult !== "double_fault") {
-    if (!draft.outcome) {
-      return "Select the point outcome.";
+  const forcedWinner = pointWinnerFromServeResult(draft.serveResult, server);
+  if (forcedWinner !== null) {
+    draft.winner = String(forcedWinner);
+    if (draft.serveResult === "ace" && draft.outcome === "uncertain") {
+      draft.outcome = "winner";
     }
-    if (draft.winner === "") {
-      return "Select who won the point.";
+    if (draft.serveResult === "double_fault" && draft.outcome === "uncertain") {
+      draft.outcome = "unforced_error";
     }
   }
-  if (flagStatesToPlayers(draft.returnWinnerStates).length && draft.outcome !== "winner") {
-    return "Return winner only applies to winner outcomes.";
-  }
-  if (draft.outcome !== "forced_error") {
-    draft.forcingShotType = "";
+  if (draft.winner === "") {
+    return "Select who won the point.";
   }
   return "";
 }
@@ -1655,17 +1763,15 @@ async function addPoint() {
     id: crypto.randomUUID(),
     type: "point",
     serveResult: draft.serveResult,
-    outcome: draft.outcome,
-    shotType: normalizeShotType(draft.shotType),
-    forcingShotType: draft.outcome === "forced_error" ? normalizeShotType(draft.forcingShotType) : "",
+    outcome: normalizeOutcome(draft.outcome),
+    resultShotType: normalizeShotType(draft.resultShotType),
+    precedingShotType: normalizeShotType(draft.precedingShotType),
     rallyLength: normalizeRallyLength(draft.rallyLength),
     winner: Number(draft.winner),
     flagged: Boolean(draft.flagged),
     excludeFromStats: Boolean(draft.excludeFromStats),
-    netApproach: flagStatesToPlayers(draft.netApproachStates).length > 0,
-    netApproachPlayers: flagStatesToPlayers(draft.netApproachStates),
-    returnWinner: flagStatesToPlayers(draft.returnWinnerStates).length > 0,
-    returnWinnerPlayers: flagStatesToPlayers(draft.returnWinnerStates),
+    netApproachStates: sanitizeTriStates(draft.netApproachStates),
+    returnWinnerStates: sanitizeTriStates(draft.returnWinnerStates),
     timestamp: new Date().toISOString(),
   });
   await saveMatch(view.match);
@@ -1696,59 +1802,26 @@ async function savePointEdit() {
   const draft = structuredClone(state.editor.draft);
   const original = view.match.points[pointIndex];
   const derivedPoint = flattenPoints(view.computed).find((point) => point.id === original.id);
-  const server = derivedPoint?.server;
-  const receiver = server === undefined ? null : 1 - server;
-
-  if (!draft.serveResult) {
-    state.error = "Select a serve result.";
+  const validationError = validatePointDraft(draft, { liveServer: derivedPoint?.server ?? view.computed.liveServer });
+  if (validationError) {
+    state.error = validationError;
     render();
     return;
-  }
-  if (draft.serveResult === "ace") {
-    draft.winner = String(server);
-    draft.outcome = "";
-    draft.shotType = "";
-    draft.forcingShotType = "";
-    draft.netApproachStates = createEmptyFlagStates();
-    draft.returnWinnerStates = createEmptyFlagStates();
-  } else if (draft.serveResult === "double_fault") {
-    draft.winner = String(receiver);
-    draft.outcome = "";
-    draft.shotType = "";
-    draft.forcingShotType = "";
-    draft.netApproachStates = createEmptyFlagStates();
-    draft.returnWinnerStates = createEmptyFlagStates();
-  } else {
-    if (!draft.outcome || draft.winner === "") {
-      state.error = "Complete all required point fields.";
-      render();
-      return;
-    }
-  }
-  if (flagStatesToPlayers(draft.returnWinnerStates).length && draft.outcome !== "winner") {
-    state.error = "Return winner only applies to winner outcomes.";
-    render();
-    return;
-  }
-  if (draft.outcome !== "forced_error") {
-    draft.forcingShotType = "";
   }
 
   view.match.points[pointIndex] = {
     ...original,
     type: "point",
     serveResult: draft.serveResult,
-    outcome: draft.outcome,
-    shotType: normalizeShotType(draft.shotType),
-    forcingShotType: draft.outcome === "forced_error" ? normalizeShotType(draft.forcingShotType) : "",
+    outcome: normalizeOutcome(draft.outcome),
+    resultShotType: normalizeShotType(draft.resultShotType),
+    precedingShotType: normalizeShotType(draft.precedingShotType),
     rallyLength: normalizeRallyLength(draft.rallyLength),
     winner: Number(draft.winner),
     flagged: Boolean(draft.flagged),
     excludeFromStats: Boolean(draft.excludeFromStats),
-    netApproach: flagStatesToPlayers(draft.netApproachStates).length > 0,
-    netApproachPlayers: flagStatesToPlayers(draft.netApproachStates),
-    returnWinner: flagStatesToPlayers(draft.returnWinnerStates).length > 0,
-    returnWinnerPlayers: flagStatesToPlayers(draft.returnWinnerStates),
+    netApproachStates: sanitizeTriStates(draft.netApproachStates),
+    returnWinnerStates: sanitizeTriStates(draft.returnWinnerStates),
   };
   await saveMatch(view.match);
   resetDrafts();
@@ -1798,15 +1871,15 @@ function openEditor(pointId) {
   state.editor.entryType = "point";
   state.editor.draft = {
     serveResult: point.serveResult,
-    outcome: point.outcome,
-    shotType: point.shotType === "serve" ? "" : normalizeShotType(point.shotType),
-    forcingShotType: normalizeShotType(point.forcingShotType),
+    outcome: normalizeOutcome(point.outcome),
+    resultShotType: normalizeShotType(point.resultShotType ?? point.shotType),
+    precedingShotType: normalizeShotType(point.precedingShotType ?? point.forcingShotType),
     rallyLength: normalizeRallyLength(point.rallyLength),
     winner: String(point.winner),
     flagged: normalizeFlagged(point.flagged),
     excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
-    netApproachStates: playersToFlagStates(derivedPoint.netApproachPlayers),
-    returnWinnerStates: playersToFlagStates(derivedPoint.returnWinnerPlayers),
+    netApproachStates: sanitizeTriStates(derivedPoint.netApproachStates),
+    returnWinnerStates: sanitizeTriStates(derivedPoint.returnWinnerStates),
   };
   render();
 }
@@ -1833,43 +1906,33 @@ function setHistoryFocus(setIndex, gameIndex) {
 function setDraftValue(target, key, value) {
   state[target][key] = value;
   if (key === "serveResult") {
-    if (value === "ace" || value === "double_fault") {
-      state[target].outcome = "";
-      state[target].shotType = "";
-      state[target].forcingShotType = "";
-      state[target].netApproachStates = createEmptyFlagStates();
-      state[target].returnWinnerStates = createEmptyFlagStates();
+    if (value === "ace") {
+      state[target].outcome = "winner";
+    } else if (value === "double_fault") {
+      state[target].outcome = "unforced_error";
     }
-  }
-  if (key === "outcome" && value !== "forced_error") {
-    state[target].forcingShotType = "";
   }
   render();
 }
 
 function updateEditorDraft(key, value) {
   state.editor.draft[key] = value;
-  if (key === "serveResult" && (value === "ace" || value === "double_fault")) {
-    state.editor.draft.outcome = "";
-    state.editor.draft.shotType = "";
-    state.editor.draft.forcingShotType = "";
-    state.editor.draft.netApproachStates = createEmptyFlagStates();
-    state.editor.draft.returnWinnerStates = createEmptyFlagStates();
-  }
-  if (key === "outcome" && value !== "forced_error") {
-    state.editor.draft.forcingShotType = "";
+  if (key === "serveResult") {
+    if (value === "ace") {
+      state.editor.draft.outcome = "winner";
+    } else if (value === "double_fault") {
+      state.editor.draft.outcome = "unforced_error";
+    }
   }
   render();
 }
 
 function toggleOptionalChoice(target, key, value) {
-  const current = state[target][key];
-  setDraftValue(target, key, current === value ? "" : value);
+  setDraftValue(target, key, value);
 }
 
 function toggleEditorOptionalChoice(key, value) {
-  const current = state.editor.draft[key];
-  updateEditorDraft(key, current === value ? "" : value);
+  updateEditorDraft(key, value);
 }
 
 function updateAdjustmentDraft(key, value) {
@@ -1891,9 +1954,9 @@ function updateAdjustmentScore(key, playerIndex, value) {
 }
 
 function updateFlagState(flagStates, playerIndex, value) {
-  const next = sanitizeFlagStates(flagStates);
-  const key = String(playerIndex);
-  next[key] = next[key] === value ? "" : value;
+  const next = sanitizeTriStates(flagStates);
+  const normalized = value === "yes" ? 1 : value === "no" ? 0 : null;
+  next[playerIndex] = next[playerIndex] === normalized ? null : normalized;
   return next;
 }
 
@@ -1912,8 +1975,22 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
   const receiverIndex = context?.receiver ?? 1 - serverIndex;
   const serverName = playerName(match, serverIndex);
   const receiverName = playerName(match, receiverIndex);
-  const aceOrDf = draft.serveResult === "ace" || draft.serveResult === "double_fault";
+  const forcedWinner = pointWinnerFromServeResult(draft.serveResult, serverIndex);
+  const winnerIndex = draft.winner === "" ? null : Number(draft.winner);
+  const loserIndex = winnerIndex === 0 || winnerIndex === 1 ? 1 - winnerIndex : null;
   const submitLabel = prefix === "edit" ? "Save Point Changes" : "Submit Point";
+  const resultShotLabel = draft.outcome === "winner" && winnerIndex !== null
+    ? `Winning Shot (by ${playerName(match, winnerIndex)})`
+    : (draft.outcome === "unforced_error" || draft.outcome === "forced_error") && loserIndex !== null
+      ? `Error Shot (by ${playerName(match, loserIndex)})`
+      : "Decisive Shot";
+  const precedingShotLabel = draft.outcome === "winner" && loserIndex !== null
+    ? `Setup Shot (by ${playerName(match, loserIndex)})`
+    : draft.outcome === "unforced_error" && winnerIndex !== null
+      ? `Preceding Shot (by ${playerName(match, winnerIndex)})`
+      : draft.outcome === "forced_error" && winnerIndex !== null
+        ? `Forcing Shot (by ${playerName(match, winnerIndex)})`
+        : "Preceding Shot";
   return `
     <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-4 shadow-panel backdrop-blur md:p-3.5">
       <div>
@@ -1923,20 +2000,52 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
         </div>
       </div>
       <div class="mt-5 space-y-5 md:mt-4 md:space-y-4">
-        ${renderChoiceGrid("Serve Result", SERVE_OPTIONS, draft.serveResult, `${prefix}-serve`, "grid-cols-2")}
-        ${!aceOrDf ? renderChoiceGrid("Who Won The Point", [{ value: "0", label: match.playerA }, { value: "1", label: match.playerB }], draft.winner, `${prefix}-winner`, "grid-cols-2") : ""}
-        ${!aceOrDf ? renderChoiceGrid("Point Outcome", OUTCOME_OPTIONS, draft.outcome, `${prefix}-outcome`, "grid-cols-2") : ""}
-        ${!aceOrDf ? renderChoiceGrid("Shot Type (Optional)", SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) })), draft.shotType, `${prefix}-shot`, "grid-cols-2", true) : ""}
-        ${!aceOrDf && draft.outcome === "forced_error" ? renderChoiceGrid("Forcing Shot Type (Optional)", SHOT_OPTIONS.map((value) => ({ value, label: shotLabel(value) })), draft.forcingShotType, `${prefix}-forcing-shot`, "grid-cols-2", true) : ""}
-        ${renderChoiceGrid("Rally Length (Optional)", RALLY_LENGTH_OPTIONS, draft.rallyLength, `${prefix}-rally`, "grid-cols-2", true)}
-        <div>
-          <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Optional Flags</p>
-          <p class="mb-3 text-sm text-court-200/60 md:text-xs">Leave both buttons unselected if the point should not record this flag.</p>
-          <div class="space-y-4">
-            ${renderBooleanToggle(prefix, "flagged", "Flag For Review", draft.flagged, "Marks this point for post-match review.")}
-            ${renderBooleanToggle(prefix, "excludeFromStats", "Exclude From Stats", draft.excludeFromStats, "Point still counts for score but excluded from statistics.")}
-            ${renderPlayerToggleSection(prefix, "netApproachStates", "Net Approach", match, draft.netApproachStates)}
-            ${renderPlayerToggleSection(prefix, "returnWinnerStates", "Return Winner", match, draft.returnWinnerStates)}
+        <div class="space-y-4 rounded-[1.75rem] border border-white/10 bg-white/5 p-4">
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Required</p>
+          ${renderChoiceGrid("Serve Result", SERVE_OPTIONS, draft.serveResult, `${prefix}-serve`, "grid-cols-2")}
+          ${renderChoiceGrid(
+            "Point Winner",
+            [
+              { value: "0", label: match.playerA, hint: forcedWinner === 0 ? "Auto from serve result" : "" },
+              { value: "1", label: match.playerB, hint: forcedWinner === 1 ? "Auto from serve result" : "" },
+            ],
+            forcedWinner !== null ? String(forcedWinner) : draft.winner,
+            `${prefix}-winner`,
+            "grid-cols-2",
+            false,
+            forcedWinner !== null
+          )}
+        </div>
+        <div class="space-y-4 rounded-[1.75rem] border border-white/10 bg-white/5 p-4">
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Optional</p>
+          ${renderChoiceGrid("Point Outcome", OUTCOME_OPTIONS, draft.outcome, `${prefix}-outcome`, "grid-cols-4")}
+          ${renderChoiceGrid(precedingShotLabel, [
+            { value: "forehand", label: "FH" },
+            { value: "backhand", label: "BH" },
+            { value: "volley", label: "Volley" },
+            { value: "overhead", label: "OH" },
+            { value: "drop_shot", label: "Drop" },
+            { value: "uncertain", label: "Uncertain", muted: true },
+          ], draft.precedingShotType, `${prefix}-preceding-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ${renderChoiceGrid(resultShotLabel, [
+            { value: "forehand", label: "FH" },
+            { value: "backhand", label: "BH" },
+            { value: "volley", label: "Volley" },
+            { value: "overhead", label: "OH" },
+            { value: "drop_shot", label: "Drop" },
+            { value: "uncertain", label: "Uncertain", muted: true },
+          ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ${renderChoiceGrid("Rally Length", RALLY_LENGTH_OPTIONS.map((option) => ({ ...option, muted: option.value === "uncertain" })), draft.rallyLength, `${prefix}-rally`, "grid-cols-3")}
+          <div class="rounded-[1.5rem] border border-white/10 bg-court-950/40 p-4">
+            <p class="text-sm font-semibold text-white">Flags</p>
+            <div class="mt-4 space-y-4">
+              ${renderPlayerToggleSection(prefix, "netApproachStates", "Net Approach", match, draft.netApproachStates)}
+              ${renderPlayerToggleSection(prefix, "returnWinnerStates", "Return Winner", match, draft.returnWinnerStates)}
+              <div class="grid gap-3 sm:grid-cols-2">
+                ${renderBooleanToggle(prefix, "flagged", "Flag", draft.flagged)}
+                ${renderBooleanToggle(prefix, "excludeFromStats", "Exclude from Stats", draft.excludeFromStats)}
+              </div>
+            </div>
           </div>
         </div>
         <button data-action="${prefix}-save" class="w-full rounded-2xl bg-emerald-500 px-5 py-5 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400 md:px-4 md:py-4 md:text-sm">
@@ -1971,7 +2080,7 @@ function renderBooleanToggle(prefix, key, label, selected, description = "") {
   `;
 }
 
-function renderChoiceGrid(label, options, selected, action, gridClass, allowUnset = false) {
+function renderChoiceGrid(label, options, selected, action, gridClass, allowUnset = false, lockSelected = false) {
   return `
     <div>
       <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">${label}</p>
@@ -1987,10 +2096,14 @@ function renderChoiceGrid(label, options, selected, action, gridClass, allowUnse
                 class="min-h-14 rounded-2xl border px-4 py-4 text-sm font-medium transition md:min-h-12 md:px-3 md:py-3 md:text-xs ${
                   active
                     ? "border-court-300 bg-court-300 text-court-950"
-                    : "border-white/10 bg-white/5 text-court-100 hover:border-court-400/70"
+                    : option.muted
+                      ? "border-white/10 bg-court-950/30 text-court-200/55 hover:border-court-300/35"
+                      : "border-white/10 bg-white/5 text-court-100 hover:border-court-400/70"
                 }"
+                ${(option.disabled || (lockSelected && !active)) ? "disabled" : ""}
               >
-                ${option.label}
+                <span>${option.label}</span>
+                ${option.hint ? `<span class="mt-1 block text-[11px] font-normal ${active ? "text-court-950/70" : "text-court-200/50"}">${option.hint}</span>` : ""}
               </button>
             `;
           })
@@ -2001,25 +2114,25 @@ function renderChoiceGrid(label, options, selected, action, gridClass, allowUnse
 }
 
 function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
-  const states = sanitizeFlagStates(flagStates);
+  const states = sanitizeTriStates(flagStates);
   return `
     <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4 md:p-3">
       <p class="text-sm font-semibold text-white md:text-xs">${label}</p>
       <div class="mt-4 space-y-3 md:mt-3">
         ${[0, 1]
           .map((playerIndex) => {
-            const selectedState = states[playerIndex] || "";
+            const selectedState = states[playerIndex];
             return `
               <div class="flex items-center justify-between gap-3">
                 <p class="text-sm text-court-100 md:text-xs">${escapeHtml(playerName(match, playerIndex))}</p>
-                <div class="grid grid-cols-2 gap-2">
+                <div class="grid grid-cols-3 gap-2">
                   <button
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
                     data-value="yes"
                     class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
-                      selectedState === "yes"
+                      selectedState === 1
                         ? "border-emerald-400 bg-emerald-500/15 text-emerald-300"
                         : "border-white/10 bg-court-950/40 text-court-100"
                     }"
@@ -2032,12 +2145,25 @@ function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
                     data-player="${playerIndex}"
                     data-value="no"
                     class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
-                      selectedState === "no"
+                      selectedState === 0
                         ? "border-red-400/40 bg-red-500/10 text-red-200"
                         : "border-white/10 bg-court-950/40 text-court-100"
                     }"
                   >
                     No
+                  </button>
+                  <button
+                    data-action="${prefix}-player-flag"
+                    data-key="${key}"
+                    data-player="${playerIndex}"
+                    data-value="uncertain"
+                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
+                      selectedState === null
+                        ? "border-slate-400/30 bg-slate-400/10 text-slate-200"
+                        : "border-white/10 bg-court-950/40 text-court-200/60"
+                    }"
+                  >
+                    ?
                   </button>
                 </div>
               </div>
@@ -2326,7 +2452,7 @@ function renderHistory(view) {
                           <p class="font-semibold text-white">Point ${entry.pointNumber} · ${playerName(match, entry.winner)} won ${normalizeFlagged(entry.flagged) ? '<span class="ml-2 rounded-full bg-amber-400/20 px-2 py-1 text-xs text-amber-200">Flagged</span>' : ""}${normalizeExcludeFromStats(entry.excludeFromStats) ? '<span class="ml-2 rounded-full bg-slate-300/20 px-2 py-1 text-xs text-slate-100">Excluded</span>' : ""}</p>
                           <p class="mt-1 text-sm text-court-200/65">${state.history.showFlaggedOnly ? `${getSetLabel(computed.sets.find((setEntry) => setEntry.index === entry.setIndex) || { index: entry.setIndex, isMatchTiebreak: false })} · Game ${entry.gameIndex + 1} · ` : ""}${pointDescription(entry)}</p>
                           <p class="mt-2 text-sm text-court-200/65">Score ${Array.isArray(entry.scoreBefore) ? entry.scoreBefore.join("-") : entry.scoreBefore} → ${Array.isArray(entry.scoreAfter) ? entry.scoreAfter.join("-") : entry.scoreAfter}</p>
-                          <p class="mt-2 text-sm text-court-200/55">${playerName(match, entry.server)} served${entry.isBreakPoint ? " · Break point" : ""}${entry.returnWinnerPlayers.length ? ` · Return winner: ${formatPlayerList(match, entry.returnWinnerPlayers)}` : ""}${entry.netApproachPlayers.length ? ` · Net: ${formatPlayerList(match, entry.netApproachPlayers)}` : ""}</p>
+                          <p class="mt-2 text-sm text-court-200/55">${playerName(match, entry.server)} served${entry.isBreakPoint ? " · Break point" : ""}${entry.returnWinnerStates.some((value) => value === 1) ? ` · Return winner: ${[0, 1].filter((playerIndex) => entry.returnWinnerStates[playerIndex] === 1).map((playerIndex) => playerName(match, playerIndex)).join(", ")}` : ""}${entry.netApproachStates.some((value) => value === 1) ? ` · Net: ${[0, 1].filter((playerIndex) => entry.netApproachStates[playerIndex] === 1).map((playerIndex) => playerName(match, playerIndex)).join(", ")}` : ""}</p>
                         </div>
                         <div class="flex gap-2">
                           <button data-action="edit-point" data-id="${entry.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
@@ -2348,25 +2474,33 @@ function renderHistory(view) {
 function renderStatsTable(match, stats) {
   const players = [match.playerA, match.playerB];
   const rows = [
+    ["Serve", "", ""],
     ["1st Serve %", formatPercent(stats[0].firstServeIn, stats[0].firstServeAttempts), formatPercent(stats[1].firstServeIn, stats[1].firstServeAttempts)],
     ["2nd Serve %", formatPercent(stats[0].secondServeIn, stats[0].secondServeAttempts), formatPercent(stats[1].secondServeIn, stats[1].secondServeAttempts)],
-    ["1st Serve Pts Won %", formatPercent(stats[0].firstServePointsWon, stats[0].firstServeIn), formatPercent(stats[1].firstServePointsWon, stats[1].firstServeIn)],
-    ["2nd Serve Pts Won %", formatPercent(stats[0].secondServePointsWon, stats[0].secondServeAttempts), formatPercent(stats[1].secondServePointsWon, stats[1].secondServeAttempts)],
+    ["1st Serve Points Won %", formatPercent(stats[0].firstServePointsWon, stats[0].firstServeIn), formatPercent(stats[1].firstServePointsWon, stats[1].firstServeIn)],
+    ["2nd Serve Points Won %", formatPercent(stats[0].secondServePointsWon, stats[0].secondServeIn), formatPercent(stats[1].secondServePointsWon, stats[1].secondServeIn)],
     ["Aces", stats[0].aces, stats[1].aces],
     ["Double Faults", stats[0].doubleFaults, stats[1].doubleFaults],
-    ["Winners", totalShotCount(stats[0].winners), totalShotCount(stats[1].winners)],
-    ["Winners FH/BH/V/O/D", shortShotLine(stats[0].winners), shortShotLine(stats[1].winners)],
-    ["Forcing Shots FH/BH/V/O/D", shortShotLine(stats[0].forcingShots), shortShotLine(stats[1].forcingShots)],
-    ["Unforced Errors", totalShotCount(stats[0].unforcedErrors), totalShotCount(stats[1].unforcedErrors)],
-    ["UFE FH/BH", `${stats[0].unforcedErrors.forehand}/${stats[0].unforcedErrors.backhand}`, `${stats[1].unforcedErrors.forehand}/${stats[1].unforcedErrors.backhand}`],
-    ["Forced Errors", stats[0].forcedErrors, stats[1].forcedErrors],
-    ["Net Points", formatFraction(stats[0].netPointsWon, stats[0].netPointsPlayed), formatFraction(stats[1].netPointsWon, stats[1].netPointsPlayed)],
-    ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
-    ["Break Points", formatFraction(stats[0].breakPointsConverted, stats[0].breakPointsOpportunities), formatFraction(stats[1].breakPointsConverted, stats[1].breakPointsOpportunities)],
-    ["Break Points Saved", formatFraction(stats[0].breakPointsSaved, stats[0].breakPointsFaced), formatFraction(stats[1].breakPointsSaved, stats[1].breakPointsFaced)],
-    ["Short Rally Points Won", formatCountPercent(stats[0].shortRallyPointsWon, stats[0].shortRallyPointsPlayed), formatCountPercent(stats[1].shortRallyPointsWon, stats[1].shortRallyPointsPlayed)],
-    ["Long Rally Points Won", formatCountPercent(stats[0].longRallyPointsWon, stats[0].longRallyPointsPlayed), formatCountPercent(stats[1].longRallyPointsWon, stats[1].longRallyPointsPlayed)],
+    ["Points", "", ""],
     ["Total Points Won", stats[0].totalPointsWon, stats[1].totalPointsWon],
+    ["Short Rally Win %", formatCountPercent(stats[0].shortRallyPointsWon, stats[0].shortRallyPointsPlayed), formatCountPercent(stats[1].shortRallyPointsWon, stats[1].shortRallyPointsPlayed)],
+    ["Long Rally Win %", formatCountPercent(stats[0].longRallyPointsWon, stats[0].longRallyPointsPlayed), formatCountPercent(stats[1].longRallyPointsWon, stats[1].longRallyPointsPlayed)],
+    ["Winners & Errors", "", ""],
+    ["Winners", sumShots(stats[0].resultShots), sumShots(stats[1].resultShots)],
+    ["Winners FH/BH/V/OH/D", shortShotLine(stats[0].resultShots), shortShotLine(stats[1].resultShots)],
+    ["Unforced Errors", sumShots(stats[0].unforcedErrors), sumShots(stats[1].unforcedErrors)],
+    ["UE FH/BH/V/OH/D", shortShotLine(stats[0].unforcedErrors), shortShotLine(stats[1].unforcedErrors)],
+    ["Forced Errors", stats[0].forcedErrors, stats[1].forcedErrors],
+    ["Forcing Shots", sumShots(stats[0].forcingShots), sumShots(stats[1].forcingShots)],
+    ["Forcing Shots FH/BH/V/OH/D", shortShotLine(stats[0].forcingShots), shortShotLine(stats[1].forcingShots)],
+    ["Patterns", "", ""],
+    ["Winners After Opp FH/BH/V/OH/D", shortShotLine(stats[0].winnersAfterOpponentShot), shortShotLine(stats[1].winnersAfterOpponentShot)],
+    ["Errors After Opp FH/BH/V/OH/D", shortShotLine(stats[0].errorsAfterOpponentShot), shortShotLine(stats[1].errorsAfterOpponentShot)],
+    ["Net & Break", "", ""],
+    ["Net Points Won / Played", formatFraction(stats[0].netPointsWon, stats[0].netPointsPlayed), formatFraction(stats[1].netPointsWon, stats[1].netPointsPlayed)],
+    ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
+    ["Break Points Converted", formatFraction(stats[0].breakPointsConverted, stats[0].breakPointsOpportunities), formatFraction(stats[1].breakPointsConverted, stats[1].breakPointsOpportunities)],
+    ["Break Points Saved", formatFraction(stats[0].breakPointsSaved, stats[0].breakPointsFaced), formatFraction(stats[1].breakPointsSaved, stats[1].breakPointsFaced)],
   ];
   return `
     <div class="overflow-hidden rounded-[2rem] border border-white/10 bg-court-900/80">
@@ -2377,19 +2511,15 @@ function renderStatsTable(match, stats) {
         ${rows
           .map(
             ([label, a, b]) => `
-              <div class="bg-court-950/80 px-4 py-3 text-court-200/70">${label}</div>
-              <div class="bg-court-950/80 px-4 py-3 text-center font-mono text-court-100">${a}</div>
-              <div class="bg-court-950/80 px-4 py-3 text-center font-mono text-court-100">${b}</div>
+              <div class="${a === "" && b === "" ? "bg-court-900 px-4 py-3 font-semibold text-white" : "bg-court-950/80 px-4 py-3 text-court-200/70"}">${label}</div>
+              <div class="${a === "" && b === "" ? "bg-court-900 px-4 py-3" : "bg-court-950/80 px-4 py-3 text-center font-mono text-court-100"}">${a}</div>
+              <div class="${a === "" && b === "" ? "bg-court-900 px-4 py-3" : "bg-court-950/80 px-4 py-3 text-center font-mono text-court-100"}">${b}</div>
             `
           )
           .join("")}
       </div>
     </div>
   `;
-}
-
-function totalShotCount(bucket) {
-  return Object.values(bucket).reduce((sum, value) => sum + value, 0);
 }
 
 function shortShotLine(bucket) {
@@ -2401,15 +2531,18 @@ function formatCountPercent(count, total) {
 }
 
 function pointDescription(point) {
-  const shotType = normalizeShotType(point.shotType);
-  const forcingShotType = normalizeShotType(point.forcingShotType);
   const rallyLength = normalizeRallyLength(point.rallyLength);
+  const contextMatch = currentMatch();
   return [
     serveLabel(point.serveResult),
-    point.outcome ? outcomeLabel(point.outcome) : "",
-    shotType ? shotLabel(shotType) : "",
-    point.outcome === "forced_error" && forcingShotType ? `Forced by: ${shotLabel(forcingShotType)}` : "",
-    rallyLength ? `Rally: ${rallyLength === "short" ? "Short (1-4)" : "Long (5+)"}` : "",
+    point.outcome !== "uncertain" ? outcomeLabel(point.outcome) : "",
+    point.outcome !== "uncertain" && point.resultShotType !== "uncertain" && point.resultShotPlayer !== null && contextMatch
+      ? `${point.outcome === "winner" ? "Winning shot" : "Error shot"} (${playerName(contextMatch, point.resultShotPlayer)}): ${shotLabel(point.resultShotType)}`
+      : "",
+    point.outcome !== "uncertain" && point.precedingShotType !== "uncertain" && point.precedingShotPlayer !== null && contextMatch
+      ? `${point.outcome === "winner" ? "Setup by" : point.outcome === "forced_error" ? "Forcing shot" : "Preceding shot"} ${playerName(contextMatch, point.precedingShotPlayer)}: ${shotLabel(point.precedingShotType)}`
+      : "",
+    rallyLength !== "uncertain" ? `Rally: ${rallyLength === "short" ? "Short (1-4)" : "Long (5+)"}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -2693,12 +2826,12 @@ document.addEventListener("click", async (event) => {
     setDraftValue("draft", "outcome", target.dataset.value);
     return;
   }
-  if (action === "draft-shot") {
-    toggleOptionalChoice("draft", "shotType", target.dataset.value);
+  if (action === "draft-result-shot") {
+    toggleOptionalChoice("draft", "resultShotType", target.dataset.value);
     return;
   }
-  if (action === "draft-forcing-shot") {
-    toggleOptionalChoice("draft", "forcingShotType", target.dataset.value);
+  if (action === "draft-preceding-shot") {
+    toggleOptionalChoice("draft", "precedingShotType", target.dataset.value);
     return;
   }
   if (action === "draft-rally") {
@@ -2730,12 +2863,12 @@ document.addEventListener("click", async (event) => {
     updateEditorDraft("outcome", target.dataset.value);
     return;
   }
-  if (action === "edit-shot") {
-    toggleEditorOptionalChoice("shotType", target.dataset.value);
+  if (action === "edit-result-shot") {
+    toggleEditorOptionalChoice("resultShotType", target.dataset.value);
     return;
   }
-  if (action === "edit-forcing-shot") {
-    toggleEditorOptionalChoice("forcingShotType", target.dataset.value);
+  if (action === "edit-preceding-shot") {
+    toggleEditorOptionalChoice("precedingShotType", target.dataset.value);
     return;
   }
   if (action === "edit-rally") {
