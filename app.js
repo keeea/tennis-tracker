@@ -2057,6 +2057,7 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
 }
 
 function renderBooleanToggle(prefix, key, label, selected, description = "") {
+  const knobPosition = selected ? "translate-x-5" : "translate-x-0";
   return `
     <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4 md:p-3">
       <div class="flex items-center justify-between gap-3">
@@ -2067,13 +2068,18 @@ function renderBooleanToggle(prefix, key, label, selected, description = "") {
         <button
           data-action="${prefix}-toggle-boolean"
           data-key="${key}"
-          class="rounded-xl border px-4 py-2 text-sm font-medium transition md:px-3 md:py-1.5 md:text-xs ${
+          aria-pressed="${selected ? "true" : "false"}"
+          class="relative inline-flex h-8 w-14 shrink-0 items-center rounded-full border transition md:h-7 md:w-12 ${
             selected
-              ? "border-court-300/50 bg-court-300/15 text-court-100"
-              : "border-white/10 bg-court-950/40 text-court-100"
+              ? "border-court-300/50 bg-court-300/25"
+              : "border-white/10 bg-court-950/70"
           }"
         >
-          ${selected ? "On" : "Off"}
+          <span class="pointer-events-none absolute inset-x-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.18em] ${selected ? "text-court-950/75" : "text-court-200/60"}">
+            <span>Off</span>
+            <span>On</span>
+          </span>
+          <span class="pointer-events-none absolute left-1 top-1 h-6 w-6 rounded-full bg-white shadow-[0_4px_12px_rgba(15,23,42,0.35)] transition-transform md:h-5 md:w-5 ${knobPosition}"></span>
         </button>
       </div>
     </div>
@@ -2115,6 +2121,11 @@ function renderChoiceGrid(label, options, selected, action, gridClass, allowUnse
 
 function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
   const states = sanitizeTriStates(flagStates);
+  const positions = {
+    uncertain: "translateX(0)",
+    no: "translateX(calc(100% + 0.25rem))",
+    yes: "translateX(calc(200% + 0.5rem))",
+  };
   return `
     <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4 md:p-3">
       <p class="text-sm font-semibold text-white md:text-xs">${label}</p>
@@ -2122,32 +2133,36 @@ function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
         ${[0, 1]
           .map((playerIndex) => {
             const selectedState = states[playerIndex];
+            const selectedValue = selectedState === 1 ? "yes" : selectedState === 0 ? "no" : "uncertain";
             return `
               <div class="flex items-center justify-between gap-3">
                 <p class="text-sm text-court-100 md:text-xs">${escapeHtml(playerName(match, playerIndex))}</p>
-                <div class="grid grid-cols-3 gap-2">
+                <div class="relative grid min-w-[15rem] grid-cols-3 gap-1 rounded-full border border-white/10 bg-court-950/70 p-1 md:min-w-[13rem]">
+                  <span class="pointer-events-none absolute bottom-1 left-1 top-1 rounded-full bg-white/12 shadow-[0_4px_10px_rgba(15,23,42,0.3)] transition-transform" style="width: calc((100% - 0.5rem) / 3); transform: ${positions[selectedValue]};"></span>
                   <button
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
-                    data-value="yes"
-                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
-                      selectedState === 1
-                        ? "border-emerald-400 bg-emerald-500/15 text-emerald-300"
-                        : "border-white/10 bg-court-950/40 text-court-100"
+                    data-value="uncertain"
+                    aria-pressed="${selectedValue === "uncertain" ? "true" : "false"}"
+                    class="relative z-10 rounded-full px-4 py-2 text-sm font-medium transition md:px-3 md:py-1.5 md:text-xs ${
+                      selectedValue === "uncertain"
+                        ? "text-white"
+                        : "text-court-200/55 hover:text-court-100"
                     }"
                   >
-                    Yes
+                    Unc
                   </button>
                   <button
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
                     data-value="no"
-                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
-                      selectedState === 0
-                        ? "border-red-400/40 bg-red-500/10 text-red-200"
-                        : "border-white/10 bg-court-950/40 text-court-100"
+                    aria-pressed="${selectedValue === "no" ? "true" : "false"}"
+                    class="relative z-10 rounded-full px-4 py-2 text-sm font-medium transition md:px-3 md:py-1.5 md:text-xs ${
+                      selectedValue === "no"
+                        ? "text-white"
+                        : "text-court-200/55 hover:text-court-100"
                     }"
                   >
                     No
@@ -2156,14 +2171,15 @@ function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
                     data-action="${prefix}-player-flag"
                     data-key="${key}"
                     data-player="${playerIndex}"
-                    data-value="uncertain"
-                    class="min-w-20 rounded-xl border px-4 py-2 text-sm font-medium transition md:min-w-16 md:px-3 md:py-1.5 md:text-xs ${
-                      selectedState === null
-                        ? "border-slate-400/30 bg-slate-400/10 text-slate-200"
-                        : "border-white/10 bg-court-950/40 text-court-200/60"
+                    data-value="yes"
+                    aria-pressed="${selectedValue === "yes" ? "true" : "false"}"
+                    class="relative z-10 rounded-full px-4 py-2 text-sm font-medium transition md:px-3 md:py-1.5 md:text-xs ${
+                      selectedValue === "yes"
+                        ? "text-white"
+                        : "text-court-200/55 hover:text-court-100"
                     }"
                   >
-                    ?
+                    Yes
                   </button>
                 </div>
               </div>
