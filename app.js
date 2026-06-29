@@ -56,6 +56,7 @@ const state = {
   currentTab: "live",
   setup: createInitialSetupState(),
   draft: createEmptyDraft(),
+  doublesDraft: createEmptyDoublesDraft(),
   history: {
     setIndex: 0,
     gameIndex: 0,
@@ -96,6 +97,23 @@ function createEmptyDraft() {
   };
 }
 
+function createEmptyDoublesDraft() {
+  return {
+    serveResult: "",
+    winner: "",
+    outcome: "uncertain",
+    resultShotPlayer: null,
+    resultShotType: "uncertain",
+    precedingShotPlayer: null,
+    precedingShotType: "uncertain",
+    rallyLength: "uncertain",
+    netPositions: createEmptyQuadStates(),
+    returnWinnerPlayer: null,
+    flagged: false,
+    excludeFromStats: false,
+  };
+}
+
 function createEmptyCheckpointDraft() {
   return {
     setScore: ["0", "0"],
@@ -107,6 +125,10 @@ function createEmptyCheckpointDraft() {
 
 function createEmptyTriStates() {
   return [null, null];
+}
+
+function createEmptyQuadStates() {
+  return [null, null, null, null];
 }
 
 function createStatsBucket() {
@@ -350,6 +372,124 @@ function getTiebreakServer(startServer, pointIndex) {
   }
   const block = Math.floor((pointIndex - 1) / 2);
   return block % 2 === 0 ? 1 - startServer : startServer;
+}
+
+function normalizeOptionalDoublesPlayerIndex(value) {
+  const next = Number(value);
+  return next >= 0 && next <= 3 && Number.isInteger(next) ? next : null;
+}
+
+function sanitizeQuadStates(value) {
+  const next = createEmptyQuadStates();
+  if (!Array.isArray(value)) {
+    return next;
+  }
+  return value.slice(0, 4).map((entry, index) => (entry === 0 || entry === 1 ? entry : next[index]));
+}
+
+function normalizeDoublesServeOrder(serveOrder) {
+  if (!Array.isArray(serveOrder) || serveOrder.length < 4) {
+    return [0, 2, 1, 3];
+  }
+  const normalized = serveOrder.map((playerIndex) => normalizeOptionalDoublesPlayerIndex(playerIndex));
+  if (normalized.some((playerIndex) => playerIndex === null)) {
+    return [0, 2, 1, 3];
+  }
+  if (new Set(normalized).size !== 4) {
+    return [0, 2, 1, 3];
+  }
+  return normalized;
+}
+
+function normalizeReceiveFormation(receiveFormation) {
+  return {
+    teamA: {
+      deuce: normalizeOptionalDoublesPlayerIndex(receiveFormation?.teamA?.deuce) ?? 0,
+      ad: normalizeOptionalDoublesPlayerIndex(receiveFormation?.teamA?.ad) ?? 1,
+    },
+    teamB: {
+      deuce: normalizeOptionalDoublesPlayerIndex(receiveFormation?.teamB?.deuce) ?? 2,
+      ad: normalizeOptionalDoublesPlayerIndex(receiveFormation?.teamB?.ad) ?? 3,
+    },
+  };
+}
+
+function normalizeDoublesSetConfig(config) {
+  return {
+    serveOrder: normalizeDoublesServeOrder(config?.serveOrder),
+    receiveFormation: normalizeReceiveFormation(config?.receiveFormation),
+  };
+}
+
+function getDoublesSetConfig(match, setIndex, fallbackConfig = null) {
+  if (Array.isArray(match.setConfigs) && match.setConfigs[setIndex]) {
+    return normalizeDoublesSetConfig(match.setConfigs[setIndex]);
+  }
+  if (fallbackConfig) {
+    return normalizeDoublesSetConfig(fallbackConfig);
+  }
+  return normalizeDoublesSetConfig(match.setConfigs?.[0]);
+}
+
+function getDoublesServerForGame(setConfig, gameIndex) {
+  const serveOrder = normalizeDoublesServeOrder(setConfig?.serveOrder);
+  return serveOrder[gameIndex % serveOrder.length];
+}
+
+function getDoublesServerForTiebreakPoint(setConfig, gameIndex, pointIndex) {
+  const serveOrder = normalizeDoublesServeOrder(setConfig?.serveOrder);
+  const startIndex = gameIndex % serveOrder.length;
+  if (pointIndex === 0) {
+    return serveOrder[startIndex];
+  }
+  const offset = 1 + Math.floor((pointIndex - 1) / 2);
+  return serveOrder[(startIndex + offset) % serveOrder.length];
+}
+
+function getDoublesReceiver(match, setIndex, server, totalPointsInGame, setConfig = null) {
+  const config = normalizeDoublesSetConfig(setConfig || getDoublesSetConfig(match, setIndex));
+  const receivingTeam = 1 - getTeamIndex(server);
+  const courtSide = totalPointsInGame % 2 === 0 ? "deuce" : "ad";
+  if (receivingTeam === 0) {
+    return config.receiveFormation.teamA[courtSide];
+  }
+  return config.receiveFormation.teamB[courtSide];
+}
+
+function createDefaultDoublesNetPositions(server, receiver) {
+  const next = createEmptyQuadStates();
+  const serverPartner = getPartnerIndex(server);
+  const receiverPartner = getPartnerIndex(receiver);
+  if (server !== null) {
+    next[server] = 0;
+  }
+  if (serverPartner !== null) {
+    next[serverPartner] = 1;
+  }
+  if (receiver !== null) {
+    next[receiver] = 0;
+  }
+  if (receiverPartner !== null) {
+    next[receiverPartner] = 1;
+  }
+  return next;
+}
+
+function alignServeOrderForGame(setConfig, gameIndex, server) {
+  const normalized = normalizeDoublesSetConfig(setConfig);
+  const serveOrder = normalized.serveOrder;
+  const targetServer = normalizeOptionalDoublesPlayerIndex(server);
+  if (targetServer === null || !serveOrder.includes(targetServer)) {
+    return normalized;
+  }
+  const gameSlot = gameIndex % serveOrder.length;
+  const currentSlot = serveOrder.indexOf(targetServer);
+  const shift = (currentSlot - gameSlot + serveOrder.length) % serveOrder.length;
+  const rotated = serveOrder.map((_, index) => serveOrder[(index + shift) % serveOrder.length]);
+  return {
+    serveOrder: rotated,
+    receiveFormation: normalizeReceiveFormation(normalized.receiveFormation),
+  };
 }
 
 function isBreakPoint(gamePoints, server) {
@@ -615,33 +755,407 @@ function normalizeStoredPoint(rawPoint) {
     excludeFromStats: normalizeExcludeFromStats(rawPoint.excludeFromStats),
     netApproachStates: sanitizeTriStates(rawPoint.netApproachStates),
     returnWinnerStates: sanitizeTriStates(rawPoint.returnWinnerStates),
+    resultShotPlayer: normalizeOptionalDoublesPlayerIndex(rawPoint.resultShotPlayer),
+    precedingShotPlayer: normalizeOptionalDoublesPlayerIndex(rawPoint.precedingShotPlayer),
+    netPositions: sanitizeQuadStates(rawPoint.netPositions),
+    returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(rawPoint.returnWinnerPlayer),
     timestamp: typeof rawPoint.timestamp === "string" && rawPoint.timestamp ? rawPoint.timestamp : new Date().toISOString(),
+  };
+}
+
+function computeDoublesMatch(match) {
+  const scoringFormat = normalizeScoringFormat(match.scoringFormat);
+  const sets = [];
+  const statsOverall = [createStatsBucket(), createStatsBucket()];
+  const statsBySet = [];
+  const rawEntries = Array.isArray(match.points) ? match.points : [];
+  const historyEntries = [];
+  let setsWon = [0, 0];
+  let currentSet = createSetContainer(0);
+  currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
+  let currentSetConfig = getDoublesSetConfig(match, currentSet.index);
+  let currentGame = null;
+  let matchWinner = null;
+  let flaggedPoints = 0;
+  let nextSetStartServer = getDoublesServerForGame(currentSetConfig, 0);
+
+  function startGame(serverOverride = getDoublesServerForGame(currentSetConfig, currentSet.games.length), pointsWon = [0, 0]) {
+    const isMatchTiebreak = currentSet.isMatchTiebreak;
+    currentGame = {
+      index: currentSet.games.length,
+      setIndex: currentSet.index,
+      server: serverOverride,
+      isTiebreak: shouldUseTiebreakGame(currentSet.gamesWon, isMatchTiebreak),
+      isSuperTiebreak: isMatchTiebreak,
+      pointsWon: [...pointsWon],
+      points: [],
+      scoreBefore: [...currentSet.gamesWon],
+      winner: null,
+    };
+    currentSet.games.push(currentGame);
+  }
+
+  function moveToNextSet(startServer) {
+    currentSet = createSetContainer(currentSet.index + 1);
+    currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
+    currentSetConfig = alignServeOrderForGame(
+      getDoublesSetConfig(match, currentSet.index, currentSetConfig),
+      0,
+      startServer
+    );
+  }
+
+  function finalizeGame() {
+    const winner = currentGame.pointsWon[0] > currentGame.pointsWon[1] ? 0 : 1;
+    currentGame.winner = winner;
+    currentSet.gamesWon[winner] += 1;
+    currentGame.scoreAfter = [...currentSet.gamesWon];
+
+    const [gamesA, gamesB] = currentSet.gamesWon;
+    const tiebreakWon = currentGame.isTiebreak && (
+      currentGame.isSuperTiebreak
+        ? isSuperTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+        : isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+    );
+    const standardSetWon =
+      (gamesA >= 6 || gamesB >= 6) &&
+      Math.abs(gamesA - gamesB) >= 2 &&
+      !currentGame.isTiebreak;
+    const setWon = tiebreakWon || standardSetWon;
+    nextSetStartServer = currentGame.isTiebreak
+      ? getDoublesServerForTiebreakPoint(currentSetConfig, currentGame.index, currentGame.points.length)
+      : getDoublesServerForGame(currentSetConfig, currentGame.index + 1);
+
+    if (currentGame.isTiebreak) {
+      currentSet.tiebreakScore = [...currentGame.pointsWon];
+    }
+
+    if (setWon) {
+      currentSet.winner = winner;
+      currentSet.score = currentGame.isSuperTiebreak ? [...currentGame.pointsWon] : [...currentSet.gamesWon];
+      setsWon[winner] += 1;
+      sets.push(currentSet);
+      currentGame = null;
+
+      if (setsWon[winner] === 2) {
+        matchWinner = winner;
+      } else {
+        moveToNextSet(nextSetStartServer);
+      }
+    } else {
+      currentGame = null;
+    }
+  }
+
+  function finalizeSetFromCheckpoint(serverOverride, scoreOverride = null) {
+    const score = scoreOverride || currentSet.gamesWon;
+    const winner = score[0] > score[1] ? 0 : 1;
+    currentSet.winner = winner;
+    currentSet.score = currentSet.isMatchTiebreak
+      ? [...(scoreOverride || currentGame?.pointsWon || [0, 0])]
+      : [...score];
+    setsWon[winner] += 1;
+    sets.push(currentSet);
+    currentGame = null;
+    nextSetStartServer = serverOverride;
+
+    if (setsWon[winner] === 2) {
+      matchWinner = winner;
+      return;
+    }
+
+    moveToNextSet(serverOverride);
+  }
+
+  rawEntries.forEach((rawEntry, pointListIndex) => {
+    if (matchWinner !== null) {
+      return;
+    }
+
+    if (isCheckpointEntry(rawEntry)) {
+      const setScore = sanitizeNumericScorePair(rawEntry.setScore, currentSet.gamesWon);
+      const fallbackServer = getDoublesServerForGame(currentSetConfig, setScore[0] + setScore[1]);
+      const server = normalizeOptionalDoublesPlayerIndex(rawEntry.server) ?? fallbackServer;
+      const useTiebreak = shouldUseTiebreakGame(setScore, currentSet.isMatchTiebreak);
+      const gameScore = sanitizeNumericScorePair(rawEntry.gameScore, [0, 0]);
+      currentSetConfig = alignServeOrderForGame(currentSetConfig, setScore[0] + setScore[1], server);
+
+      historyEntries.push({
+        id: rawEntry.id,
+        type: "checkpoint",
+        rawIndex: pointListIndex,
+        setIndex: currentSet.index,
+        gameIndex: checkpointGameIndex(currentSet, currentGame),
+        pointNumber: null,
+        server,
+        setScore: [...setScore],
+        gameScore: [...gameScore],
+        isTiebreak: useTiebreak,
+        isSuperTiebreak: currentSet.isMatchTiebreak,
+        timestamp: typeof rawEntry.timestamp === "string" && rawEntry.timestamp ? rawEntry.timestamp : new Date().toISOString(),
+      });
+
+      currentSet.gamesWon = [...setScore];
+      currentSet.score = currentSet.isMatchTiebreak ? [...gameScore] : [...setScore];
+      currentGame = null;
+
+      if (currentSet.isMatchTiebreak) {
+        currentSet.tiebreakScore = [...gameScore];
+        if (isSuperTiebreakWon(gameScore[0], gameScore[1])) {
+          finalizeSetFromCheckpoint(server, gameScore);
+        } else {
+          startGame(server, gameScore);
+        }
+        return;
+      }
+
+      if (setIsCompleteByScore(setScore)) {
+        if ((setScore[0] === 7 || setScore[1] === 7) && (gameScore[0] > 0 || gameScore[1] > 0)) {
+          currentSet.tiebreakScore = [...gameScore];
+        }
+        finalizeSetFromCheckpoint(server);
+        return;
+      }
+
+      startGame(server, gameScore);
+      return;
+    }
+
+    if (!currentGame) {
+      startGame();
+    }
+
+    const pointInGame = currentGame.points.length;
+    const server = currentGame.isTiebreak
+      ? getDoublesServerForTiebreakPoint(currentSetConfig, currentGame.index, pointInGame)
+      : currentGame.server;
+    const receiver = getDoublesReceiver(match, currentSet.index, server, pointInGame, currentSetConfig);
+    const serverTeam = getTeamIndex(server);
+    const receiverTeam = 1 - serverTeam;
+    const normalizedPoint = normalizeStoredPoint(rawEntry);
+    const winner = normalizedPoint.winner;
+    if (winner === null) {
+      return;
+    }
+    const loser = 1 - winner;
+    const isBreakChance = !currentGame.isTiebreak && isBreakPoint(currentGame.pointsWon, serverTeam);
+    const scoreBeforeGamePoint = currentGame.isTiebreak
+      ? [...currentGame.pointsWon]
+      : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat);
+    const netPositions = sanitizeQuadStates(normalizedPoint.netPositions);
+    const resolvedNetPositions = netPositions.some((value) => value !== null)
+      ? netPositions
+      : createDefaultDoublesNetPositions(server, receiver);
+    const resultShotPlayer = normalizedPoint.resultShotPlayer;
+    const precedingShotPlayer = normalizedPoint.precedingShotPlayer;
+    const returnWinnerPlayer = normalizedPoint.returnWinnerPlayer;
+    const { outcome, resultShotType, precedingShotType, rallyLength } = normalizedPoint;
+    const setBuckets = ensureSetBucket(statsBySet, currentSet.index);
+    const flagged = normalizedPoint.flagged;
+    const excludeFromStats = normalizedPoint.excludeFromStats;
+
+    if (flagged) {
+      flaggedPoints += 1;
+    }
+
+    if (!excludeFromStats) {
+      [statsOverall, setBuckets].forEach((bucketGroup) => {
+        bucketGroup[winner].totalPointsWon += 1;
+        bucketGroup[serverTeam].servicePoints += 1;
+        bucketGroup[receiverTeam].returnPoints += 1;
+        bucketGroup[serverTeam].firstServeAttempts += 1;
+
+        if (normalizedPoint.serveResult === "first_in" || normalizedPoint.serveResult === "ace") {
+          bucketGroup[serverTeam].firstServeIn += 1;
+          if (winner === serverTeam) {
+            bucketGroup[serverTeam].firstServePointsWon += 1;
+          }
+        }
+
+        if (normalizedPoint.serveResult === "second_in" || normalizedPoint.serveResult === "double_fault") {
+          bucketGroup[serverTeam].secondServeAttempts += 1;
+        }
+
+        if (normalizedPoint.serveResult === "second_in") {
+          bucketGroup[serverTeam].secondServeIn += 1;
+          if (winner === serverTeam) {
+            bucketGroup[serverTeam].secondServePointsWon += 1;
+          }
+        }
+
+        if (normalizedPoint.serveResult === "ace") {
+          bucketGroup[serverTeam].aces += 1;
+        }
+
+        if (normalizedPoint.serveResult === "double_fault") {
+          bucketGroup[serverTeam].doubleFaults += 1;
+        }
+
+        if (outcome === "winner" && resultShotType !== "uncertain") {
+          bucketGroup[winner].resultShots[resultShotType] += 1;
+        }
+
+        if (outcome === "unforced_error" && resultShotType !== "uncertain") {
+          bucketGroup[loser].unforcedErrors[resultShotType] += 1;
+        }
+
+        if (outcome === "forced_error") {
+          bucketGroup[loser].forcedErrors += 1;
+          if (precedingShotType !== "uncertain") {
+            bucketGroup[winner].forcingShots[precedingShotType] += 1;
+          }
+        }
+
+        if (outcome !== "uncertain" && precedingShotType !== "uncertain") {
+          if (outcome === "winner") {
+            bucketGroup[winner].winnersAfterOpponentShot[precedingShotType] += 1;
+          } else {
+            bucketGroup[loser].errorsAfterOpponentShot[precedingShotType] += 1;
+          }
+        }
+
+        [0, 1].forEach((teamIndex) => {
+          const playerIndexes = teamIndex === 0 ? [0, 1] : [2, 3];
+          const hasKnownPosition = playerIndexes.some((playerIndex) => resolvedNetPositions[playerIndex] === 0 || resolvedNetPositions[playerIndex] === 1);
+          const hasNetPlayer = playerIndexes.some((playerIndex) => resolvedNetPositions[playerIndex] === 1);
+          if (hasKnownPosition) {
+            bucketGroup[teamIndex].netPointsPlayed += 1;
+          }
+          if (hasNetPlayer && winner === teamIndex) {
+            bucketGroup[teamIndex].netPointsWon += 1;
+          }
+        });
+
+        if (returnWinnerPlayer !== null) {
+          bucketGroup[getTeamIndex(returnWinnerPlayer)].returnWinners += 1;
+        }
+
+        if (rallyLength === "short") {
+          bucketGroup[0].shortRallyPointsPlayed += 1;
+          bucketGroup[1].shortRallyPointsPlayed += 1;
+          bucketGroup[winner].shortRallyPointsWon += 1;
+        }
+        if (rallyLength === "long") {
+          bucketGroup[0].longRallyPointsPlayed += 1;
+          bucketGroup[1].longRallyPointsPlayed += 1;
+          bucketGroup[winner].longRallyPointsWon += 1;
+        }
+
+        if (isBreakChance) {
+          bucketGroup[receiverTeam].breakPointsOpportunities += 1;
+          bucketGroup[serverTeam].breakPointsFaced += 1;
+        }
+      });
+    }
+
+    currentGame.pointsWon[winner] += 1;
+    const wonGame = currentGame.isTiebreak
+      ? currentGame.isSuperTiebreak
+        ? isSuperTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+        : isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
+      : isGameWon(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat);
+    const scoreAfterGamePoint = currentGame.isTiebreak
+      ? [...currentGame.pointsWon]
+      : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat);
+
+    if (isBreakChance && !excludeFromStats) {
+      [statsOverall, setBuckets].forEach((bucketGroup) => {
+        if (winner === receiverTeam && wonGame) {
+          bucketGroup[receiverTeam].breakPointsConverted += 1;
+        }
+        if (winner === serverTeam) {
+          bucketGroup[serverTeam].breakPointsSaved += 1;
+        }
+      });
+    }
+
+    currentGame.points.push({
+      ...normalizedPoint,
+      type: "point",
+      rawIndex: pointListIndex,
+      setIndex: currentSet.index,
+      gameIndex: currentGame.index,
+      pointNumber: pointInGame + 1,
+      server,
+      receiver,
+      winner,
+      loser,
+      scoreBefore: scoreBeforeGamePoint,
+      scoreAfter: scoreAfterGamePoint,
+      isBreakPoint: isBreakChance,
+      resultShotPlayer,
+      precedingShotPlayer,
+      netPositions: resolvedNetPositions,
+      returnWinnerPlayer,
+      flagged,
+      excludeFromStats,
+      rallyLength,
+    });
+
+    historyEntries.push(currentGame.points[currentGame.points.length - 1]);
+
+    if (wonGame) {
+      finalizeGame();
+    }
+  });
+
+  if (currentSet.games.length && !sets.find((set) => set.index === currentSet.index)) {
+    currentSet.score = currentSet.isMatchTiebreak && currentGame ? [...currentGame.pointsWon] : [...currentSet.gamesWon];
+    sets.push(currentSet);
+  }
+
+  const liveSetIsMatchTiebreak = currentSet.isMatchTiebreak;
+  const liveSetDisplay = liveSetIsMatchTiebreak && currentGame ? [...currentGame.pointsWon] : [...currentSet.gamesWon];
+  const liveGameType = currentGame
+    ? currentGame.isSuperTiebreak
+      ? "super_tiebreak"
+      : currentGame.isTiebreak
+        ? "tiebreak"
+        : "standard"
+    : liveSetIsMatchTiebreak
+      ? "super_tiebreak"
+      : "standard";
+  const liveServer = currentGame
+    ? currentGame.isTiebreak
+      ? getDoublesServerForTiebreakPoint(currentSetConfig, currentGame.index, currentGame.points.length)
+      : currentGame.server
+    : getDoublesServerForGame(currentSetConfig, currentSet.games.length);
+  const liveReceiver = currentGame
+    ? getDoublesReceiver(match, currentSet.index, liveServer, currentGame.points.length, currentSetConfig)
+    : getDoublesReceiver(match, currentSet.index, liveServer, 0, currentSetConfig);
+  const isComplete = matchWinner !== null;
+
+  return {
+    sets,
+    setsWon,
+    statsOverall,
+    statsBySet,
+    matchWinner,
+    isComplete,
+    liveSetIndex: currentSet.index,
+    liveServer,
+    liveReceiver,
+    liveSetGames: currentSet.gamesWon,
+    liveSetDisplay,
+    liveSetIsMatchTiebreak,
+    liveGamePoints: currentGame ? currentGame.pointsWon : [0, 0],
+    liveGameIsTiebreak: Boolean(currentGame?.isTiebreak),
+    liveGameType,
+    liveScoreDisplay: currentGame
+      ? currentGame.isTiebreak
+        ? currentGame.pointsWon.map(String)
+        : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat)
+      : ["0", "0"],
+    liveSetConfig: currentSetConfig,
+    totalPoints: historyEntries.filter((entry) => entry.type === "point").length,
+    flaggedPoints,
+    historyEntries,
   };
 }
 
 function computeMatch(match) {
   if (normalizeMatchType(match.matchType) === "doubles") {
-    const liveServer = Number(match.setConfigs?.[0]?.serveOrder?.[0]);
-    return {
-      sets: [],
-      setsWon: [0, 0],
-      statsOverall: [createStatsBucket(), createStatsBucket()],
-      statsBySet: [],
-      matchWinner: null,
-      isComplete: false,
-      liveSetIndex: 0,
-      liveServer: Number.isInteger(liveServer) ? liveServer : 0,
-      liveSetGames: [0, 0],
-      liveSetDisplay: [0, 0],
-      liveSetIsMatchTiebreak: false,
-      liveGamePoints: [0, 0],
-      liveGameIsTiebreak: false,
-      liveGameType: "standard",
-      liveScoreDisplay: ["0", "0"],
-      totalPoints: 0,
-      flaggedPoints: 0,
-      historyEntries: [],
-    };
+    return computeDoublesMatch(match);
   }
   const scoringFormat = normalizeScoringFormat(match.scoringFormat);
   const sets = [];
@@ -1067,6 +1581,7 @@ async function deleteMatch(matchId) {
 
 function resetDrafts() {
   state.draft = createEmptyDraft();
+  state.doublesDraft = createEmptyDoublesDraft();
   state.editor = {
     entryId: "",
     entryType: "point",
@@ -1122,7 +1637,9 @@ function encodeDataForExport(match) {
           type: "checkpoint",
           setScore: sanitizeNumericScorePair(entry.setScore, [0, 0]),
           gameScore: sanitizeNumericScorePair(entry.gameScore, [0, 0]),
-          server: Number(entry.server) === 1 ? 1 : 0,
+          server: normalizeMatchType(match.matchType) === "doubles"
+            ? normalizeOptionalDoublesPlayerIndex(entry.server) ?? 0
+            : Number(entry.server) === 1 ? 1 : 0,
           timestamp: entry.timestamp,
         }
         : {
@@ -1138,6 +1655,10 @@ function encodeDataForExport(match) {
           excludeFromStats: normalizeExcludeFromStats(entry.excludeFromStats),
           netApproachStates: sanitizeTriStates(entry.netApproachStates),
           returnWinnerStates: sanitizeTriStates(entry.returnWinnerStates),
+          resultShotPlayer: normalizeOptionalDoublesPlayerIndex(entry.resultShotPlayer),
+          precedingShotPlayer: normalizeOptionalDoublesPlayerIndex(entry.precedingShotPlayer),
+          netPositions: sanitizeQuadStates(entry.netPositions),
+          returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(entry.returnWinnerPlayer),
           timestamp: entry.timestamp,
         }
     )),
@@ -1169,11 +1690,15 @@ function encodeDataForExport(match) {
           scoreAfter: point.scoreAfter,
           serveResult: point.serveResult,
           outcome: point.outcome,
+          resultShotPlayer: point.resultShotPlayer === null ? null : playerName(match, point.resultShotPlayer),
           resultShotType: normalizeShotType(point.resultShotType),
+          precedingShotPlayer: point.precedingShotPlayer === null ? null : playerName(match, point.precedingShotPlayer),
           precedingShotType: normalizeShotType(point.precedingShotType),
           rallyLength: normalizeRallyLength(point.rallyLength),
-          netApproachStates: point.netApproachStates.map((value) => (value === null ? "uncertain" : value === 1 ? "yes" : "no")),
-          returnWinnerStates: point.returnWinnerStates.map((value) => (value === null ? "uncertain" : value === 1 ? "yes" : "no")),
+          netApproachStates: point.netApproachStates?.map((value) => (value === null ? "uncertain" : value === 1 ? "yes" : "no")),
+          returnWinnerStates: point.returnWinnerStates?.map((value) => (value === null ? "uncertain" : value === 1 ? "yes" : "no")),
+          netPositions: point.netPositions?.map((value) => (value === null ? "uncertain" : value === 1 ? "net" : "back")),
+          returnWinnerPlayer: point.returnWinnerPlayer === null ? null : playerName(match, point.returnWinnerPlayer),
           isBreakPoint: point.isBreakPoint,
           flagged: normalizeFlagged(point.flagged),
           excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
@@ -1187,6 +1712,72 @@ function encodeDataForExport(match) {
 
 function makeCsv(match) {
   const computed = computeMatch(match);
+  if (match.matchType === "doubles") {
+    const rows = [[
+      "set",
+      "game",
+      "point",
+      "tiebreak",
+      "server",
+      "receiver",
+      "winner_team",
+      "serve_result",
+      "outcome",
+      "result_shot_player",
+      "result_shot_type",
+      "preceding_shot_player",
+      "preceding_shot_type",
+      "rally_length",
+      "score_before",
+      "score_after",
+      "break_point",
+      "net_p1",
+      "net_p2",
+      "net_p3",
+      "net_p4",
+      "return_winner_player",
+      "flagged",
+      "exclude_from_stats",
+    ]];
+
+    computed.sets.forEach((set) => {
+      set.games.forEach((game) => {
+        game.points.forEach((point) => {
+          rows.push([
+            set.index + 1,
+            game.index + 1,
+            point.pointNumber,
+            game.isTiebreak ? "yes" : "no",
+            playerName(match, point.server),
+            playerName(match, point.receiver),
+            point.winner === 0 ? `Team A (${getTeamName(match, 0)})` : `Team B (${getTeamName(match, 1)})`,
+            point.serveResult,
+            point.outcome,
+            point.resultShotPlayer === null ? "" : playerName(match, point.resultShotPlayer),
+            normalizeShotType(point.resultShotType),
+            point.precedingShotPlayer === null ? "" : playerName(match, point.precedingShotPlayer),
+            normalizeShotType(point.precedingShotType),
+            normalizeRallyLength(point.rallyLength),
+            Array.isArray(point.scoreBefore) ? point.scoreBefore.join("-") : point.scoreBefore,
+            Array.isArray(point.scoreAfter) ? point.scoreAfter.join("-") : point.scoreAfter,
+            point.isBreakPoint ? "yes" : "no",
+            ...(point.netPositions || []).map((value) => (value === null ? "uncertain" : value === 1 ? "net" : "back")),
+            point.returnWinnerPlayer === null ? "" : playerName(match, point.returnWinnerPlayer),
+            normalizeFlagged(point.flagged) ? "yes" : "no",
+            normalizeExcludeFromStats(point.excludeFromStats) ? "yes" : "no",
+          ]);
+        });
+      });
+    });
+
+    return rows
+      .map((row) =>
+        row
+          .map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`)
+          .join(",")
+      )
+      .join("\n");
+  }
   const rows = [
     [
       "set",
@@ -1272,7 +1863,7 @@ function validateImportedPoint(point) {
       type: "checkpoint",
       setScore: sanitizeNumericScorePair(point.setScore, [0, 0]),
       gameScore: sanitizeNumericScorePair(point.gameScore, [0, 0]),
-      server: Number(point.server) === 1 ? 1 : 0,
+      server: normalizeOptionalDoublesPlayerIndex(point.server) ?? (Number(point.server) === 1 ? 1 : 0),
       timestamp: typeof point.timestamp === "string" && point.timestamp ? point.timestamp : new Date().toISOString(),
     };
   }
@@ -1325,6 +1916,10 @@ function validateImportedPoint(point) {
     excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
     netApproachStates,
     returnWinnerStates,
+    resultShotPlayer: normalizeOptionalDoublesPlayerIndex(point.resultShotPlayer),
+    precedingShotPlayer: normalizeOptionalDoublesPlayerIndex(point.precedingShotPlayer),
+    netPositions: sanitizeQuadStates(point.netPositions),
+    returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(point.returnWinnerPlayer),
     timestamp: typeof point.timestamp === "string" && point.timestamp ? point.timestamp : new Date().toISOString(),
   };
 }
@@ -1492,13 +2087,14 @@ function importMatchFromJson(text) {
   }
 
   if (normalizeMatchType(payload.match.matchType) === "doubles") {
+    const points = Array.isArray(payload.entries) ? payload.entries.map((entry) => validateImportedPoint(entry)) : [];
     const importedMatch = createImportedMatch({
       matchType: "doubles",
       scoringFormat: payload.match.scoringFormat,
       teamA: payload.match.teamA,
       teamB: payload.match.teamB,
       setConfigs: payload.match.setConfigs,
-      points: [],
+      points,
     });
     validateImportedMatchShape(importedMatch);
     return importedMatch;
@@ -1829,6 +2425,64 @@ function validatePointDraft(draft, computed) {
   return "";
 }
 
+function getDoublesTeamOptions(match, teamIndex) {
+  return teamIndex === 0
+    ? [
+      { value: "0", label: match.teamA.player1 || "Player 1" },
+      { value: "1", label: match.teamA.player2 || "Player 2" },
+    ]
+    : [
+      { value: "2", label: match.teamB.player1 || "Player 3" },
+      { value: "3", label: match.teamB.player2 || "Player 4" },
+    ];
+}
+
+function resolveDoublesContext(match, computed, context = null) {
+  const server = context?.server ?? computed.liveServer;
+  const receiver = context?.receiver ?? computed.liveReceiver ?? getDoublesReceiver(match, computed.liveSetIndex, server, 0, computed.liveSetConfig);
+  return { server, receiver };
+}
+
+function pointWinnerTeamFromServeResult(serveResult, server) {
+  if (serveResult === "ace") {
+    return getTeamIndex(server);
+  }
+  if (serveResult === "double_fault") {
+    return 1 - getTeamIndex(server);
+  }
+  return null;
+}
+
+function applyDoublesServeResultEffects(draft, server, receiver) {
+  const forcedWinner = pointWinnerTeamFromServeResult(draft.serveResult, server);
+  if (!sanitizeQuadStates(draft.netPositions).some((value) => value !== null)) {
+    draft.netPositions = createDefaultDoublesNetPositions(server, receiver);
+  }
+  if (forcedWinner !== null) {
+    draft.winner = String(forcedWinner);
+    if (draft.serveResult === "ace") {
+      draft.outcome = "winner";
+      draft.resultShotPlayer = server;
+    }
+    if (draft.serveResult === "double_fault") {
+      draft.outcome = "unforced_error";
+      draft.resultShotPlayer = server;
+    }
+  }
+}
+
+function validateDoublesPointDraft(draft, match, computed, context = null) {
+  if (!draft.serveResult) {
+    return "Select a serve result.";
+  }
+  const { server, receiver } = resolveDoublesContext(match, computed, context);
+  applyDoublesServeResultEffects(draft, server, receiver);
+  if (draft.winner === "") {
+    return "Select which team won the point.";
+  }
+  return "";
+}
+
 function getCheckpointDraftFromComputed(computed) {
   return {
     setScore: computed.liveSetGames.map(String),
@@ -1842,19 +2496,22 @@ function getCheckpointDraftFromEntry(entry) {
   return {
     setScore: sanitizeNumericScorePair(entry.setScore, [0, 0]).map(String),
     gameScore: sanitizeNumericScorePair(entry.gameScore, [0, 0]).map(String),
-    server: String(Number(entry.server) === 1 ? 1 : 0),
+    server: String(entry.server),
     isTiebreak: Boolean(entry.isTiebreak || entry.isSuperTiebreak),
   };
 }
 
 function normalizeCheckpointDraft(draft) {
+  const match = currentMatch();
   const isTiebreak = Boolean(draft.isTiebreak);
   return {
     setScore: sanitizeNumericScorePair(draft.setScore, [0, 0]),
     gameScore: isTiebreak
       ? sanitizeNumericScorePair(draft.gameScore, [0, 0])
       : draft.gameScore.map((value) => standardPointLabelToValue(value)),
-    server: Number(draft.server) === 1 ? 1 : 0,
+    server: match?.matchType === "doubles"
+      ? normalizeOptionalDoublesPlayerIndex(draft.server) ?? 0
+      : Number(draft.server) === 1 ? 1 : 0,
     isTiebreak,
   };
 }
@@ -2028,6 +2685,46 @@ async function addPoint() {
     render();
     return;
   }
+  if (view.match.matchType === "doubles") {
+    const draft = structuredClone(state.doublesDraft);
+    const error = validateDoublesPointDraft(draft, view.match, view.computed);
+    if (error) {
+      state.error = error;
+      render();
+      return;
+    }
+    const { server, receiver } = resolveDoublesContext(view.match, view.computed);
+    view.match.points.push({
+      id: crypto.randomUUID(),
+      type: "point",
+      serveResult: draft.serveResult,
+      outcome: normalizeOutcome(draft.outcome),
+      winner: Number(draft.winner),
+      resultShotPlayer: normalizeOptionalDoublesPlayerIndex(draft.resultShotPlayer),
+      resultShotType: normalizeShotType(draft.resultShotType),
+      precedingShotPlayer: normalizeOptionalDoublesPlayerIndex(draft.precedingShotPlayer),
+      precedingShotType: normalizeShotType(draft.precedingShotType),
+      rallyLength: normalizeRallyLength(draft.rallyLength),
+      netPositions: sanitizeQuadStates(draft.netPositions).some((value) => value !== null)
+        ? sanitizeQuadStates(draft.netPositions)
+        : createDefaultDoublesNetPositions(server, receiver),
+      returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(draft.returnWinnerPlayer),
+      flagged: Boolean(draft.flagged),
+      excludeFromStats: Boolean(draft.excludeFromStats),
+      timestamp: new Date().toISOString(),
+    });
+    await saveMatch(view.match);
+    state.error = "";
+    state.exportMessage = "";
+    state.history = {
+      ...state.history,
+      setIndex: 0,
+      gameIndex: 0,
+    };
+    state.doublesDraft = createEmptyDoublesDraft();
+    render();
+    return;
+  }
   const draft = structuredClone(state.draft);
   const error = validatePointDraft(draft, view.computed);
   if (error) {
@@ -2073,6 +2770,43 @@ async function savePointEdit() {
   }
   const pointIndex = view.match.points.findIndex((point) => point.id === state.editor.entryId);
   if (pointIndex < 0) {
+    return;
+  }
+  if (view.match.matchType === "doubles") {
+    const draft = structuredClone(state.editor.draft);
+    const original = view.match.points[pointIndex];
+    const derivedPoint = flattenPoints(view.computed).find((point) => point.id === original.id);
+    const validationError = validateDoublesPointDraft(draft, view.match, view.computed, derivedPoint ? { server: derivedPoint.server, receiver: derivedPoint.receiver } : null);
+    if (validationError) {
+      state.error = validationError;
+      render();
+      return;
+    }
+    const context = derivedPoint
+      ? { server: derivedPoint.server, receiver: derivedPoint.receiver }
+      : resolveDoublesContext(view.match, view.computed);
+    view.match.points[pointIndex] = {
+      ...original,
+      type: "point",
+      serveResult: draft.serveResult,
+      outcome: normalizeOutcome(draft.outcome),
+      winner: Number(draft.winner),
+      resultShotPlayer: normalizeOptionalDoublesPlayerIndex(draft.resultShotPlayer),
+      resultShotType: normalizeShotType(draft.resultShotType),
+      precedingShotPlayer: normalizeOptionalDoublesPlayerIndex(draft.precedingShotPlayer),
+      precedingShotType: normalizeShotType(draft.precedingShotType),
+      rallyLength: normalizeRallyLength(draft.rallyLength),
+      netPositions: sanitizeQuadStates(draft.netPositions).some((value) => value !== null)
+        ? sanitizeQuadStates(draft.netPositions)
+        : createDefaultDoublesNetPositions(context.server, context.receiver),
+      returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(draft.returnWinnerPlayer),
+      flagged: Boolean(draft.flagged),
+      excludeFromStats: Boolean(draft.excludeFromStats),
+    };
+    await saveMatch(view.match);
+    resetDrafts();
+    state.error = "";
+    render();
     return;
   }
   const draft = structuredClone(state.editor.draft);
@@ -2145,6 +2879,24 @@ function openEditor(pointId) {
   };
   state.editor.entryId = pointId;
   state.editor.entryType = "point";
+  if (view.match.matchType === "doubles") {
+    state.editor.draft = {
+      serveResult: point.serveResult,
+      outcome: normalizeOutcome(point.outcome),
+      winner: String(point.winner),
+      resultShotPlayer: normalizeOptionalDoublesPlayerIndex(point.resultShotPlayer ?? derivedPoint.resultShotPlayer),
+      resultShotType: normalizeShotType(point.resultShotType ?? point.shotType),
+      precedingShotPlayer: normalizeOptionalDoublesPlayerIndex(point.precedingShotPlayer ?? derivedPoint.precedingShotPlayer),
+      precedingShotType: normalizeShotType(point.precedingShotType ?? point.forcingShotType),
+      rallyLength: normalizeRallyLength(point.rallyLength),
+      netPositions: sanitizeQuadStates(point.netPositions ?? derivedPoint.netPositions),
+      returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(point.returnWinnerPlayer ?? derivedPoint.returnWinnerPlayer),
+      flagged: normalizeFlagged(point.flagged),
+      excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
+    };
+    render();
+    return;
+  }
   state.editor.draft = {
     serveResult: point.serveResult,
     outcome: normalizeOutcome(point.outcome),
@@ -2191,6 +2943,47 @@ function setDraftValue(target, key, value) {
   render();
 }
 
+function setDoublesDraftValue(target, key, value) {
+  const view = derivedCurrentMatch();
+  const draft = target === "edit" ? state.editor.draft : state.doublesDraft;
+  draft[key] = value;
+  if (view?.match?.matchType === "doubles") {
+    const context = target === "edit" && state.editor.entryId
+      ? flattenPoints(view.computed).find((point) => point.id === state.editor.entryId)
+      : null;
+    const { server, receiver } = resolveDoublesContext(view.match, view.computed, context ? { server: context.server, receiver: context.receiver } : null);
+    if (key === "serveResult") {
+      applyDoublesServeResultEffects(draft, server, receiver);
+    }
+    const forcedWinner = pointWinnerTeamFromServeResult(draft.serveResult, server);
+    const winnerIndex = forcedWinner ?? (draft.winner === "" ? null : Number(draft.winner));
+    const loserIndex = winnerIndex === 0 || winnerIndex === 1 ? 1 - winnerIndex : null;
+    const precedingTeam = draft.outcome === "winner"
+      ? loserIndex
+      : draft.outcome === "unforced_error" || draft.outcome === "forced_error"
+        ? winnerIndex
+        : null;
+    const resultTeam = draft.outcome === "winner"
+      ? winnerIndex
+      : draft.outcome === "unforced_error" || draft.outcome === "forced_error"
+        ? loserIndex
+        : null;
+    if (
+      precedingTeam !== null &&
+      (draft.precedingShotPlayer === null || getTeamIndex(draft.precedingShotPlayer) !== precedingTeam)
+    ) {
+      draft.precedingShotPlayer = null;
+    }
+    if (
+      resultTeam !== null &&
+      (draft.resultShotPlayer === null || getTeamIndex(draft.resultShotPlayer) !== resultTeam)
+    ) {
+      draft.resultShotPlayer = null;
+    }
+  }
+  render();
+}
+
 function updateEditorDraft(key, value) {
   state.editor.draft[key] = value;
   if (key === "serveResult") {
@@ -2200,6 +2993,31 @@ function updateEditorDraft(key, value) {
       state.editor.draft.outcome = "unforced_error";
     }
   }
+  render();
+}
+
+function updateDoublesDraftPlayer(target, key, value) {
+  const draft = target === "edit" ? state.editor.draft : state.doublesDraft;
+  const normalized = value === "uncertain" ? null : normalizeOptionalDoublesPlayerIndex(value);
+  draft[key] = draft[key] === normalized ? null : normalized;
+  render();
+}
+
+function updateDoublesNetPosition(target, playerIndex, value) {
+  const view = derivedCurrentMatch();
+  const draft = target === "edit" ? state.editor.draft : state.doublesDraft;
+  const normalized = value === "net" ? 1 : value === "back" ? 0 : null;
+  const next = sanitizeQuadStates(draft.netPositions);
+  if (!next.some((entry) => entry !== null) && view?.match?.matchType === "doubles") {
+    const context = target === "edit" && state.editor.entryId
+      ? flattenPoints(view.computed).find((point) => point.id === state.editor.entryId)
+      : null;
+    const { server, receiver } = resolveDoublesContext(view.match, view.computed, context ? { server: context.server, receiver: context.receiver } : null);
+    draft.netPositions = createDefaultDoublesNetPositions(server, receiver);
+  }
+  const resolved = sanitizeQuadStates(draft.netPositions);
+  resolved[playerIndex] = resolved[playerIndex] === normalized ? null : normalized;
+  draft.netPositions = resolved;
   render();
 }
 
@@ -2246,7 +3064,184 @@ function renderMetric(title, value, detail = "") {
   `;
 }
 
+function renderDoublesPlayerChoiceRow(prefix, action, label, options, selected) {
+  return `
+    <div>
+      <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">${label}</p>
+      <div class="grid gap-3 sm:grid-cols-2">
+        ${options.map((option) => `
+          <button
+            data-action="${prefix}-${action}"
+            data-value="${option.value}"
+            class="min-h-14 rounded-2xl border px-4 py-4 text-sm font-medium transition ${
+              String(selected) === String(option.value)
+                ? "border-court-300 bg-court-300 text-court-950"
+                : "border-white/10 bg-white/5 text-court-100 hover:border-court-400/70"
+            }"
+          >
+            ${escapeHtml(option.label)}
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderDoublesNetPositionSection(prefix, match, netPositions) {
+  const states = sanitizeQuadStates(netPositions);
+  return `
+    <div class="rounded-[1.5rem] border border-white/10 bg-court-950/40 p-4">
+      <p class="text-sm font-semibold text-white">Net Positions</p>
+      <div class="mt-4 space-y-3">
+        ${[0, 1, 2, 3].map((playerIndex) => {
+          const selected = states[playerIndex] === 1 ? "net" : states[playerIndex] === 0 ? "back" : "uncertain";
+          return `
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</p>
+              <div class="grid min-w-[12rem] grid-cols-3 gap-2">
+                ${[
+                  { value: "back", label: "Back" },
+                  { value: "net", label: "Net" },
+                  { value: "uncertain", label: "Unc" },
+                ].map((option) => `
+                  <button
+                    data-action="${prefix}-doubles-net"
+                    data-player="${playerIndex}"
+                    data-value="${option.value}"
+                    class="rounded-xl border px-3 py-2 text-sm ${
+                      selected === option.value
+                        ? "border-court-300 bg-court-300 text-court-950"
+                        : "border-white/10 bg-white/5 text-court-100"
+                    }"
+                  >
+                    ${option.label}
+                  </button>
+                `).join("")}
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderDoublesPointComposer(match, computed, draft, prefix, context = null) {
+  const { server, receiver } = resolveDoublesContext(match, computed, context);
+  const forcedWinner = pointWinnerTeamFromServeResult(draft.serveResult, server);
+  const winnerIndex = forcedWinner ?? (draft.winner === "" ? null : Number(draft.winner));
+  const loserIndex = winnerIndex === 0 || winnerIndex === 1 ? 1 - winnerIndex : null;
+  const precedingTeam = draft.outcome === "winner"
+    ? loserIndex
+    : draft.outcome === "unforced_error" || draft.outcome === "forced_error"
+      ? winnerIndex
+      : null;
+  const resultTeam = draft.outcome === "winner"
+    ? winnerIndex
+    : draft.outcome === "unforced_error" || draft.outcome === "forced_error"
+      ? loserIndex
+      : null;
+  const submitLabel = prefix === "edit" ? "Save Point Changes" : "Submit Point";
+  const resolvedNetPositions = sanitizeQuadStates(draft.netPositions).some((value) => value !== null)
+    ? sanitizeQuadStates(draft.netPositions)
+    : createDefaultDoublesNetPositions(server, receiver);
+  return `
+    <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-4 shadow-panel backdrop-blur md:p-3.5">
+      <div>
+        <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Point Entry</p>
+        <p class="mt-2 text-sm text-court-200/70">Serving: <span class="font-semibold text-white">${escapeHtml(playerName(match, server))}</span></p>
+        <p class="mt-1 text-sm text-court-200/70">Receiving: <span class="font-semibold text-white">${escapeHtml(playerName(match, receiver))}</span></p>
+      </div>
+      <div class="mt-5 space-y-5">
+        <div class="space-y-4 rounded-[1.75rem] border border-white/10 bg-white/5 p-4">
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Required</p>
+          ${renderChoiceGrid("Serve Result", SERVE_OPTIONS.map((option) => ({ ...option, label: option.label.replace("Serve ", " ") })), draft.serveResult, `${prefix}-serve`, "grid-cols-2")}
+          ${renderChoiceGrid(
+            "Point Winner",
+            [
+              { value: "0", label: `Team A: ${getTeamName(match, 0)}`, hint: forcedWinner === 0 ? "Auto from serve result" : "" },
+              { value: "1", label: `Team B: ${getTeamName(match, 1)}`, hint: forcedWinner === 1 ? "Auto from serve result" : "" },
+            ],
+            winnerIndex === null ? draft.winner : String(winnerIndex),
+            `${prefix}-winner`,
+            "grid-cols-2",
+            false,
+            forcedWinner !== null
+          )}
+        </div>
+        <div class="space-y-4 rounded-[1.75rem] border border-white/10 bg-white/5 p-4">
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Optional</p>
+          ${renderChoiceGrid("Outcome", OUTCOME_OPTIONS, draft.outcome, `${prefix}-outcome`, "grid-cols-4")}
+          ${
+            precedingTeam === null
+              ? ""
+              : renderDoublesPlayerChoiceRow(
+                prefix,
+                "doubles-preceding-player",
+                draft.outcome === "winner"
+                  ? `Setup Shot (by ${getTeamName(match, precedingTeam)})`
+                  : draft.outcome === "forced_error"
+                    ? `Forcing Shot (by ${getTeamName(match, precedingTeam)})`
+                    : `Preceding Shot (by ${getTeamName(match, precedingTeam)})`,
+                getDoublesTeamOptions(match, precedingTeam),
+                draft.precedingShotPlayer
+              )
+          }
+          ${renderChoiceGrid("Preceding Shot Type", [
+            { value: "forehand", label: "FH" },
+            { value: "backhand", label: "BH" },
+            { value: "volley", label: "V" },
+            { value: "overhead", label: "OH" },
+            { value: "drop_shot", label: "Drop" },
+            { value: "uncertain", label: "Unc", muted: true },
+          ], draft.precedingShotType, `${prefix}-preceding-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ${
+            resultTeam === null
+              ? ""
+              : renderDoublesPlayerChoiceRow(
+                prefix,
+                "doubles-result-player",
+                draft.outcome === "winner"
+                  ? `Winning Shot (by ${getTeamName(match, resultTeam)})`
+                  : `Error Shot (by ${getTeamName(match, resultTeam)})`,
+                getDoublesTeamOptions(match, resultTeam),
+                draft.resultShotPlayer
+              )
+          }
+          ${renderChoiceGrid("Result Shot Type", [
+            { value: "forehand", label: "FH" },
+            { value: "backhand", label: "BH" },
+            { value: "volley", label: "V" },
+            { value: "overhead", label: "OH" },
+            { value: "drop_shot", label: "Drop" },
+            { value: "uncertain", label: "Unc", muted: true },
+          ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ${renderChoiceGrid("Rally Length", RALLY_LENGTH_OPTIONS.map((option) => ({ ...option, muted: option.value === "uncertain" })), draft.rallyLength, `${prefix}-rally`, "grid-cols-3")}
+          ${renderDoublesNetPositionSection(prefix, match, resolvedNetPositions)}
+          ${renderDoublesPlayerChoiceRow(
+            prefix,
+            "doubles-return-winner",
+            `Return Winner (${getTeamName(match, getTeamIndex(receiver))})`,
+            [...getDoublesTeamOptions(match, getTeamIndex(receiver)), { value: "uncertain", label: "Unc" }],
+            draft.returnWinnerPlayer === null ? "uncertain" : draft.returnWinnerPlayer
+          )}
+          <div class="grid gap-3 sm:grid-cols-2">
+            ${renderBooleanToggle(prefix, "flagged", "Flag", draft.flagged)}
+            ${renderBooleanToggle(prefix, "excludeFromStats", "Exclude from Stats", draft.excludeFromStats)}
+          </div>
+        </div>
+        <button data-action="${prefix}-save" class="w-full rounded-2xl bg-emerald-500 px-5 py-5 text-base font-semibold text-emerald-950 transition hover:bg-emerald-400 md:px-4 md:py-4 md:text-sm">
+          ${submitLabel}
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 function renderPointComposer(match, computed, draft, prefix, context = null) {
+  if (match.matchType === "doubles") {
+    return renderDoublesPointComposer(match, computed, draft, prefix, context);
+  }
   const serverIndex = context?.server ?? computed.liveServer;
   const receiverIndex = context?.receiver ?? 1 - serverIndex;
   const serverName = playerName(match, serverIndex);
@@ -2745,52 +3740,123 @@ function renderSetup() {
 function renderLive(view) {
   const { match, computed } = view;
   if (match.matchType === "doubles") {
-    const setConfig = match.setConfigs?.[0] || {};
-    const serveOrder = Array.isArray(setConfig.serveOrder) ? setConfig.serveOrder : [];
-    const receiveFormation = setConfig.receiveFormation || {};
+    const setConfig = computed.liveSetConfig || getDoublesSetConfig(match, computed.liveSetIndex);
+    const serveOrder = normalizeDoublesServeOrder(setConfig.serveOrder);
+    const receiveFormation = normalizeReceiveFormation(setConfig.receiveFormation);
+    const visibleSetIndexes = [0, 1];
+    if (computed.setsWon[0] === 1 && computed.setsWon[1] === 1) {
+      visibleSetIndexes.push(2);
+    }
+    const setCards = visibleSetIndexes
+      .map((setIndex) => {
+        const set = computed.sets.find((entry) => entry.index === setIndex);
+        const isLiveSet = setIndex === computed.liveSetIndex;
+        const isMatchTiebreak = set?.isMatchTiebreak || (isLiveSet && computed.liveSetIsMatchTiebreak);
+        const score = set ? getSetDisplayScore(set) : isLiveSet ? computed.liveSetDisplay : [0, 0];
+        return `
+          <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">${isMatchTiebreak ? "Match Tiebreak" : `Set ${setIndex + 1}`}</p>
+            <div class="mt-3 grid grid-cols-2 gap-2 text-center font-mono text-2xl text-white">
+              <span>${score[0]}</span>
+              <span>${score[1]}</span>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+    const winnerBanner =
+      computed.matchWinner !== null
+        ? `<div class="mt-4 rounded-2xl border border-court-300/30 bg-court-300/10 px-4 py-3 text-sm text-court-200">Match complete. <span class="font-semibold text-white">${escapeHtml(getTeamName(match, computed.matchWinner))}</span> wins.</div>`
+        : "";
     return `
       <section class="space-y-4">
-        <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur md:p-4">
-          <div class="flex items-start justify-between gap-4">
-            <div>
-              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
-              <h2 class="mt-2 text-2xl font-bold text-white md:text-xl">${escapeHtml(matchTitle(match))}</h2>
-              <p class="mt-2 text-sm text-court-200/65 md:text-xs">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
+        <div class="grid gap-4 md:grid-cols-2 md:items-start">
+          <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur md:p-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
+                <h2 class="mt-2 text-2xl font-bold text-white md:text-xl">Team A (${escapeHtml(getTeamName(match, 0))}) <span class="text-court-300/60">vs</span> Team B (${escapeHtml(getTeamName(match, 1))})</h2>
+                <p class="mt-2 text-sm text-court-200/65 md:text-xs">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
+              </div>
+              <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right md:px-3 md:py-2">
+                <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Server</p>
+                <p class="mt-1 text-base font-semibold text-white md:text-sm">${escapeHtml(playerName(match, computed.liveServer))}</p>
+                <p class="mt-2 text-xs uppercase tracking-[0.25em] text-court-300/60">Receiver</p>
+                <p class="mt-1 text-base font-semibold text-white md:text-sm">${escapeHtml(playerName(match, computed.liveReceiver))}</p>
+              </div>
             </div>
-            <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right md:px-3 md:py-2">
-              <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">1st Server</p>
-              <p class="mt-1 text-base font-semibold text-white md:text-sm">${escapeHtml(playerName(match, serveOrder[0] ?? 0))}</p>
+            ${winnerBanner}
+            <div class="mt-4 grid gap-3 sm:grid-cols-3">${setCards}</div>
+            <div class="mt-4 rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5 md:p-4">
+              <div class="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.9fr)] md:items-start">
+                <div>
+                  <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center">
+                    <div>
+                      <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">Team A</p>
+                      <p class="mt-1 text-xs text-court-200/60">${escapeHtml(getTeamName(match, 0))}</p>
+                      <p class="mt-3 font-mono text-5xl font-semibold text-white md:mt-2 md:text-4xl">${computed.liveScoreDisplay[0]}</p>
+                    </div>
+                    <span class="text-court-300/30">:</span>
+                    <div>
+                      <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">Team B</p>
+                      <p class="mt-1 text-xs text-court-200/60">${escapeHtml(getTeamName(match, 1))}</p>
+                      <p class="mt-3 font-mono text-5xl font-semibold text-white md:mt-2 md:text-4xl">${computed.liveScoreDisplay[1]}</p>
+                    </div>
+                  </div>
+                  <p class="mt-3 text-center text-sm text-court-200/65 md:text-xs">${
+                    computed.liveGameType === "super_tiebreak"
+                      ? "Super Tiebreak in progress"
+                      : computed.liveGameType === "tiebreak"
+                        ? "Tiebreak in progress"
+                        : "Current game score"
+                  }</p>
+                </div>
+                <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                  ${renderMetric(
+                    computed.liveSetIsMatchTiebreak ? "Match Tiebreak" : "Games In Set",
+                    `${computed.liveSetDisplay[0]} - ${computed.liveSetDisplay[1]}`,
+                    computed.liveSetIsMatchTiebreak ? "First to 10, win by 2" : `Set ${computed.liveSetIndex + 1}`
+                  )}
+                  ${renderMetric("Points Logged", String(computed.totalPoints))}
+                </div>
+              </div>
+              <div class="mt-4 grid gap-4 md:grid-cols-2">
+                <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-court-100">
+                  <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Serve Order</p>
+                  <p class="mt-2">${serveOrder.map((playerIndex, orderIndex) => `${orderIndex + 1}. ${playerName(match, playerIndex)}`).join(" → ")}</p>
+                </div>
+                <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-court-100">
+                  <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Receive Formation</p>
+                  <p class="mt-2">Team A: Deuce ${escapeHtml(playerName(match, receiveFormation.teamA.deuce))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamA.ad))}</p>
+                  <p class="mt-2">Team B: Deuce ${escapeHtml(playerName(match, receiveFormation.teamB.deuce))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamB.ad))}</p>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="mt-4 grid gap-4 md:grid-cols-2">
-            <div class="rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5">
-              <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Set 1 Serve Order</p>
-              <p class="mt-3 text-sm text-court-100">${serveOrder.map((playerIndex, orderIndex) => `${orderIndex + 1}. ${playerName(match, playerIndex)}`).join(" → ")}</p>
+          </section>
+          ${
+            computed.matchWinner === null
+              ? renderPointComposer(match, computed, state.doublesDraft, "draft")
+              : `<section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5 text-sm text-court-200/70 md:p-4 md:text-xs">
+                  Start a new match from the matches tab or export this result below.
+                </section>`
+          }
+        </div>
+        <div>
+          <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Export</p>
+                <p class="mt-2 text-sm text-court-200/65">Download or share the current match.</p>
+              </div>
+              ${state.exportMessage ? `<span class="text-xs text-court-300">${escapeHtml(state.exportMessage)}</span>` : ""}
             </div>
-            <div class="rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5">
-              <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Receive Formation</p>
-              <p class="mt-3 text-sm text-court-100">Team A: Deuce ${escapeHtml(playerName(match, receiveFormation.teamA?.deuce ?? 0))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamA?.ad ?? 1))}</p>
-              <p class="mt-2 text-sm text-court-100">Team B: Deuce ${escapeHtml(playerName(match, receiveFormation.teamB?.deuce ?? 2))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamB?.ad ?? 3))}</p>
+            <div class="mt-4 grid gap-3">
+              <button data-action="export" data-kind="json" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white">Export JSON</button>
+              <button data-action="export" data-kind="csv" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white">Export CSV</button>
+              <button data-action="export" data-kind="share" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white ${state.shareSupported ? "" : "opacity-60"}">Share</button>
             </div>
-          </div>
-          <div class="mt-4 rounded-2xl border border-court-300/30 bg-court-300/10 px-4 py-4 text-sm text-court-100">
-            Doubles scoring coming soon. Match setup saved.
-          </div>
-        </section>
-        <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Export</p>
-              <p class="mt-2 text-sm text-court-200/65">Download or share the current match.</p>
-            </div>
-            ${state.exportMessage ? `<span class="text-xs text-court-300">${escapeHtml(state.exportMessage)}</span>` : ""}
-          </div>
-          <div class="mt-4 grid gap-3">
-            <button data-action="export" data-kind="json" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white">Export JSON</button>
-            <button data-action="export" data-kind="csv" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white">Export CSV</button>
-            <button data-action="export" data-kind="share" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white ${state.shareSupported ? "" : "opacity-60"}">Share</button>
-          </div>
-        </section>
+          </section>
+        </div>
       </section>
     `;
   }
@@ -2996,10 +4062,23 @@ function renderHistory(view) {
                     } p-4">
                       <div class="flex items-start justify-between gap-4">
                         <div>
-                          <p class="font-semibold text-white">Point ${entry.pointNumber} · ${playerName(match, entry.winner)} won ${normalizeFlagged(entry.flagged) ? '<span class="ml-2 rounded-full bg-amber-400/20 px-2 py-1 text-xs text-amber-200">Flagged</span>' : ""}${normalizeExcludeFromStats(entry.excludeFromStats) ? '<span class="ml-2 rounded-full bg-slate-300/20 px-2 py-1 text-xs text-slate-100">Excluded</span>' : ""}</p>
+                          <p class="font-semibold text-white">Point ${entry.pointNumber} · ${
+                            match.matchType === "doubles"
+                              ? `Team ${entry.winner === 0 ? "A" : "B"} won`
+                              : `${playerName(match, entry.winner)} won`
+                          } ${normalizeFlagged(entry.flagged) ? '<span class="ml-2 rounded-full bg-amber-400/20 px-2 py-1 text-xs text-amber-200">Flagged</span>' : ""}${normalizeExcludeFromStats(entry.excludeFromStats) ? '<span class="ml-2 rounded-full bg-slate-300/20 px-2 py-1 text-xs text-slate-100">Excluded</span>' : ""}</p>
                           <p class="mt-1 text-sm text-court-200/65">${state.history.showFlaggedOnly ? `${getSetLabel(computed.sets.find((setEntry) => setEntry.index === entry.setIndex) || { index: entry.setIndex, isMatchTiebreak: false })} · Game ${entry.gameIndex + 1} · ` : ""}${pointDescription(entry)}</p>
                           <p class="mt-2 text-sm text-court-200/65">Score ${Array.isArray(entry.scoreBefore) ? entry.scoreBefore.join("-") : entry.scoreBefore} → ${Array.isArray(entry.scoreAfter) ? entry.scoreAfter.join("-") : entry.scoreAfter}</p>
-                          <p class="mt-2 text-sm text-court-200/55">${playerName(match, entry.server)} served${entry.isBreakPoint ? " · Break point" : ""}${entry.returnWinnerStates.some((value) => value === 1) ? ` · Return winner: ${[0, 1].filter((playerIndex) => entry.returnWinnerStates[playerIndex] === 1).map((playerIndex) => playerName(match, playerIndex)).join(", ")}` : ""}${entry.netApproachStates.some((value) => value === 1) ? ` · Net: ${[0, 1].filter((playerIndex) => entry.netApproachStates[playerIndex] === 1).map((playerIndex) => playerName(match, playerIndex)).join(", ")}` : ""}</p>
+                          <p class="mt-2 text-sm text-court-200/55">${
+                            match.matchType === "doubles"
+                              ? `Server: ${playerName(match, entry.server)} · Receiver: ${playerName(match, entry.receiver)}${entry.isBreakPoint ? " · Break point" : ""}${entry.returnWinnerPlayer !== null ? ` · Return winner: ${playerName(match, entry.returnWinnerPlayer)}` : ""}`
+                              : `${playerName(match, entry.server)} served${entry.isBreakPoint ? " · Break point" : ""}${entry.returnWinnerStates.some((value) => value === 1) ? ` · Return winner: ${[0, 1].filter((playerIndex) => entry.returnWinnerStates[playerIndex] === 1).map((playerIndex) => playerName(match, playerIndex)).join(", ")}` : ""}${entry.netApproachStates.some((value) => value === 1) ? ` · Net: ${[0, 1].filter((playerIndex) => entry.netApproachStates[playerIndex] === 1).map((playerIndex) => playerName(match, playerIndex)).join(", ")}` : ""}`
+                          }</p>
+                          ${
+                            match.matchType === "doubles"
+                              ? `<p class="mt-2 text-sm text-court-200/55">Net: ${[0, 1, 2, 3].map((playerIndex) => `${playerName(match, playerIndex)} ${entry.netPositions?.[playerIndex] === 1 ? "Net" : entry.netPositions?.[playerIndex] === 0 ? "Back" : "Unc"}`).join(" · ")}</p>`
+                              : ""
+                          }
                         </div>
                         <div class="flex gap-2">
                           <button data-action="edit-point" data-id="${entry.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
@@ -3205,6 +4284,7 @@ function renderAdjustScoreModal(view) {
   const draft = state.adjustment.draft;
   const standardOptions = ["0", "15", "30", "40", "Ad"];
   const title = state.adjustment.editId ? "Edit Score Adjustment" : "Adjust Score";
+  const serverOptions = match.matchType === "doubles" ? [0, 1, 2, 3] : [0, 1];
 
   return `
     <div class="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
@@ -3222,7 +4302,7 @@ function renderAdjustScoreModal(view) {
             <div class="grid grid-cols-2 gap-3">
               ${[0, 1].map((playerIndex) => `
                 <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <span class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</span>
+                  <span class="text-sm text-court-100">${escapeHtml(sideName(match, playerIndex))}</span>
                   <input data-action="adjust-set-score" data-player="${playerIndex}" type="number" min="0" max="7" value="${escapeHtml(draft.setScore[playerIndex])}" class="mt-3 w-full bg-transparent font-mono text-2xl text-white outline-none" />
                 </label>
               `).join("")}
@@ -3240,7 +4320,7 @@ function renderAdjustScoreModal(view) {
             <div class="grid grid-cols-2 gap-3">
               ${[0, 1].map((playerIndex) => `
                 <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <span class="text-sm text-court-100">${escapeHtml(playerName(match, playerIndex))}</span>
+                  <span class="text-sm text-court-100">${escapeHtml(sideName(match, playerIndex))}</span>
                   ${
                     draft.isTiebreak
                       ? `<input data-action="adjust-game-score" data-player="${playerIndex}" type="number" min="0" value="${escapeHtml(draft.gameScore[playerIndex])}" class="mt-3 w-full bg-transparent font-mono text-2xl text-white outline-none" />`
@@ -3254,8 +4334,8 @@ function renderAdjustScoreModal(view) {
           </div>
           <div>
             <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Is Serving?</p>
-            <div class="grid grid-cols-2 gap-3">
-              ${[0, 1].map((playerIndex) => `
+            <div class="grid gap-3 ${match.matchType === "doubles" ? "grid-cols-2" : "grid-cols-2"}">
+              ${serverOptions.map((playerIndex) => `
                 <button data-action="adjust-server" data-value="${playerIndex}" class="rounded-2xl border px-4 py-4 text-sm font-medium ${
                   draft.server === String(playerIndex)
                     ? "border-court-300 bg-court-300 text-court-950"
@@ -3414,27 +4494,67 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "draft-serve") {
-    setDraftValue("draft", "serveResult", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", "serveResult", target.dataset.value);
+    } else {
+      setDraftValue("draft", "serveResult", target.dataset.value);
+    }
     return;
   }
   if (action === "draft-outcome") {
-    setDraftValue("draft", "outcome", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", "outcome", target.dataset.value);
+    } else {
+      setDraftValue("draft", "outcome", target.dataset.value);
+    }
     return;
   }
   if (action === "draft-result-shot") {
-    toggleOptionalChoice("draft", "resultShotType", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", "resultShotType", target.dataset.value);
+    } else {
+      toggleOptionalChoice("draft", "resultShotType", target.dataset.value);
+    }
     return;
   }
   if (action === "draft-preceding-shot") {
-    toggleOptionalChoice("draft", "precedingShotType", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", "precedingShotType", target.dataset.value);
+    } else {
+      toggleOptionalChoice("draft", "precedingShotType", target.dataset.value);
+    }
     return;
   }
   if (action === "draft-rally") {
-    toggleOptionalChoice("draft", "rallyLength", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", "rallyLength", target.dataset.value);
+    } else {
+      toggleOptionalChoice("draft", "rallyLength", target.dataset.value);
+    }
     return;
   }
   if (action === "draft-winner") {
-    setDraftValue("draft", "winner", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", "winner", target.dataset.value);
+    } else {
+      setDraftValue("draft", "winner", target.dataset.value);
+    }
+    return;
+  }
+  if (action === "draft-doubles-result-player") {
+    updateDoublesDraftPlayer("draft", "resultShotPlayer", target.dataset.value);
+    return;
+  }
+  if (action === "draft-doubles-preceding-player") {
+    updateDoublesDraftPlayer("draft", "precedingShotPlayer", target.dataset.value);
+    return;
+  }
+  if (action === "draft-doubles-return-winner") {
+    updateDoublesDraftPlayer("draft", "returnWinnerPlayer", target.dataset.value);
+    return;
+  }
+  if (action === "draft-doubles-net") {
+    updateDoublesNetPosition("draft", Number(target.dataset.player), target.dataset.value);
     return;
   }
   if (action === "draft-player-flag") {
@@ -3447,31 +4567,75 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "draft-toggle-boolean") {
-    setDraftValue("draft", target.dataset.key, !state.draft[target.dataset.key]);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("draft", target.dataset.key, !state.doublesDraft[target.dataset.key]);
+    } else {
+      setDraftValue("draft", target.dataset.key, !state.draft[target.dataset.key]);
+    }
     return;
   }
   if (action === "edit-serve") {
-    updateEditorDraft("serveResult", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", "serveResult", target.dataset.value);
+    } else {
+      updateEditorDraft("serveResult", target.dataset.value);
+    }
     return;
   }
   if (action === "edit-outcome") {
-    updateEditorDraft("outcome", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", "outcome", target.dataset.value);
+    } else {
+      updateEditorDraft("outcome", target.dataset.value);
+    }
     return;
   }
   if (action === "edit-result-shot") {
-    toggleEditorOptionalChoice("resultShotType", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", "resultShotType", target.dataset.value);
+    } else {
+      toggleEditorOptionalChoice("resultShotType", target.dataset.value);
+    }
     return;
   }
   if (action === "edit-preceding-shot") {
-    toggleEditorOptionalChoice("precedingShotType", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", "precedingShotType", target.dataset.value);
+    } else {
+      toggleEditorOptionalChoice("precedingShotType", target.dataset.value);
+    }
     return;
   }
   if (action === "edit-rally") {
-    toggleEditorOptionalChoice("rallyLength", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", "rallyLength", target.dataset.value);
+    } else {
+      toggleEditorOptionalChoice("rallyLength", target.dataset.value);
+    }
     return;
   }
   if (action === "edit-winner") {
-    updateEditorDraft("winner", target.dataset.value);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", "winner", target.dataset.value);
+    } else {
+      updateEditorDraft("winner", target.dataset.value);
+    }
+    return;
+  }
+  if (action === "edit-doubles-result-player") {
+    updateDoublesDraftPlayer("edit", "resultShotPlayer", target.dataset.value);
+    return;
+  }
+  if (action === "edit-doubles-preceding-player") {
+    updateDoublesDraftPlayer("edit", "precedingShotPlayer", target.dataset.value);
+    return;
+  }
+  if (action === "edit-doubles-return-winner") {
+    updateDoublesDraftPlayer("edit", "returnWinnerPlayer", target.dataset.value);
+    return;
+  }
+  if (action === "edit-doubles-net") {
+    updateDoublesNetPosition("edit", Number(target.dataset.player), target.dataset.value);
     return;
   }
   if (action === "edit-player-flag") {
@@ -3486,7 +4650,11 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "edit-toggle-boolean") {
-    updateEditorDraft(target.dataset.key, !state.editor.draft[target.dataset.key]);
+    if (currentMatch()?.matchType === "doubles") {
+      setDoublesDraftValue("edit", target.dataset.key, !state.editor.draft[target.dataset.key]);
+    } else {
+      updateEditorDraft(target.dataset.key, !state.editor.draft[target.dataset.key]);
+    }
     return;
   }
   if (action === "history-game") {
