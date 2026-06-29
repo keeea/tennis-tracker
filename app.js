@@ -62,6 +62,10 @@ const state = {
     gameIndex: 0,
     showFlaggedOnly: false,
   },
+  stats: {
+    setFilter: "overall",
+    showDoublesIndividuals: false,
+  },
   editor: {
     entryId: "",
     entryType: "point",
@@ -191,6 +195,29 @@ function createStatsBucket() {
     longRallyPointsPlayed: 0,
     longRallyPointsWon: 0,
     totalPointsWon: 0,
+  };
+}
+
+function createDoublesIndividualStatsBucket() {
+  return {
+    firstServeAttempts: 0,
+    firstServeIn: 0,
+    secondServeAttempts: 0,
+    secondServeIn: 0,
+    firstServePointsWon: 0,
+    secondServePointsWon: 0,
+    aces: 0,
+    doubleFaults: 0,
+    returnPoints: 0,
+    returnPointsWon: 0,
+    returnWinners: 0,
+    winnersHit: 0,
+    unforcedErrors: 0,
+    forcingShots: 0,
+    netPointsPlayed: 0,
+    netPointsWon: 0,
+    backPointsPlayed: 0,
+    backPointsWon: 0,
   };
 }
 
@@ -2316,6 +2343,10 @@ async function finalizeImportedMatch(match) {
   state.currentMatchId = match.id;
   localStorage.setItem(STORAGE_KEY, match.id);
   state.currentTab = "live";
+  state.stats = {
+    setFilter: "overall",
+    showDoublesIndividuals: false,
+  };
   state.error = "";
   state.exportMessage = "";
   resetDrafts();
@@ -2648,6 +2679,10 @@ async function createMatchFromSetup() {
     state.currentMatchId = match.id;
     localStorage.setItem(STORAGE_KEY, match.id);
     state.currentTab = "live";
+    state.stats = {
+      setFilter: "overall",
+      showDoublesIndividuals: false,
+    };
     resetDrafts();
     state.setup = createInitialSetupState();
     state.error = "";
@@ -2672,6 +2707,10 @@ async function createMatchFromSetup() {
   state.currentMatchId = match.id;
   localStorage.setItem(STORAGE_KEY, match.id);
   state.currentTab = "live";
+  state.stats = {
+    setFilter: "overall",
+    showDoublesIndividuals: false,
+  };
   resetDrafts();
   state.setup = createInitialSetupState();
   state.error = "";
@@ -2922,6 +2961,10 @@ function setActiveMatch(matchId) {
   localStorage.setItem(STORAGE_KEY, matchId);
   state.currentTab = "live";
   state.exportMessage = "";
+  state.stats = {
+    setFilter: "overall",
+    showDoublesIndividuals: false,
+  };
   resetDrafts();
   render();
 }
@@ -4098,7 +4141,9 @@ function renderHistory(view) {
 }
 
 function renderStatsTable(match, stats) {
-  const players = [sideName(match, 0), sideName(match, 1)];
+  const players = match.matchType === "doubles"
+    ? [`Team A (${sideName(match, 0)})`, `Team B (${sideName(match, 1)})`]
+    : [sideName(match, 0), sideName(match, 1)];
   const rows = [
     ["Serve", "", ""],
     ["1st Serve %", formatPercent(stats[0].firstServeIn, stats[0].firstServeAttempts), formatPercent(stats[1].firstServeIn, stats[1].firstServeAttempts)],
@@ -4156,6 +4201,156 @@ function formatCountPercent(count, total) {
   return `${count} (${formatPercent(count, total)})`;
 }
 
+function computeDoublesIndividualStats(match, computed, setFilter = "overall") {
+  const players = Array.from({ length: 4 }, () => createDoublesIndividualStatsBucket());
+  const targetSetIndex = setFilter.startsWith("set-") ? Number(setFilter.slice(4)) : null;
+
+  flattenHistoryEntries(computed).forEach((entry) => {
+    if (entry.type !== "point" || entry.excludeFromStats) {
+      return;
+    }
+    if (targetSetIndex !== null && entry.setIndex !== targetSetIndex) {
+      return;
+    }
+
+    const server = entry.server;
+    const receiver = entry.receiver;
+    const winningTeam = entry.winner;
+    const serverTeam = getTeamIndex(server);
+    const receiverTeam = getTeamIndex(receiver);
+
+    if (Number.isInteger(server) && players[server]) {
+      players[server].firstServeAttempts += 1;
+      if (entry.serveResult === "first_in" || entry.serveResult === "ace") {
+        players[server].firstServeIn += 1;
+        if (winningTeam === serverTeam) {
+          players[server].firstServePointsWon += 1;
+        }
+      }
+      if (entry.serveResult === "second_in" || entry.serveResult === "double_fault") {
+        players[server].secondServeAttempts += 1;
+      }
+      if (entry.serveResult === "second_in") {
+        players[server].secondServeIn += 1;
+        if (winningTeam === serverTeam) {
+          players[server].secondServePointsWon += 1;
+        }
+      }
+      if (entry.serveResult === "ace") {
+        players[server].aces += 1;
+      }
+      if (entry.serveResult === "double_fault") {
+        players[server].doubleFaults += 1;
+      }
+    }
+
+    if (Number.isInteger(receiver) && players[receiver]) {
+      players[receiver].returnPoints += 1;
+      if (winningTeam === receiverTeam) {
+        players[receiver].returnPointsWon += 1;
+      }
+    }
+
+    if (entry.returnWinnerPlayer !== null && players[entry.returnWinnerPlayer]) {
+      players[entry.returnWinnerPlayer].returnWinners += 1;
+    }
+
+    if (entry.outcome === "winner" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+      players[entry.resultShotPlayer].winnersHit += 1;
+    }
+    if (entry.outcome === "unforced_error" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+      players[entry.resultShotPlayer].unforcedErrors += 1;
+    }
+    if (entry.outcome === "forced_error" && entry.precedingShotPlayer !== null && players[entry.precedingShotPlayer]) {
+      players[entry.precedingShotPlayer].forcingShots += 1;
+    }
+
+    const netPositions = sanitizeQuadStates(entry.netPositions);
+    netPositions.forEach((position, playerIndex) => {
+      if (!players[playerIndex]) {
+        return;
+      }
+      const wonPoint = winningTeam === getTeamIndex(playerIndex);
+      if (position === 1) {
+        players[playerIndex].netPointsPlayed += 1;
+        if (wonPoint) {
+          players[playerIndex].netPointsWon += 1;
+        }
+      }
+      if (position === 0) {
+        players[playerIndex].backPointsPlayed += 1;
+        if (wonPoint) {
+          players[playerIndex].backPointsWon += 1;
+        }
+      }
+    });
+  });
+
+  return players;
+}
+
+function statsSetLabel(computed, setIndex) {
+  return computed.sets[setIndex]?.isMatchTiebreak ? "Match TB" : `Set ${setIndex + 1}`;
+}
+
+function statsSetScore(computed, setIndex) {
+  const set = computed.sets[setIndex];
+  if (!set) {
+    return "0 - 0";
+  }
+  return getSetDisplayScore(set).join(" - ");
+}
+
+function renderStatsSetFilter(options, selectedKey) {
+  return `
+    <div class="flex flex-wrap gap-2">
+      ${options.map((option) => `
+        <button
+          data-action="stats-set-filter"
+          data-value="${option.key}"
+          class="rounded-full border px-4 py-2 text-sm transition ${
+            option.key === selectedKey
+              ? "border-court-300 bg-court-300 text-court-950"
+              : "border-white/10 bg-white/5 text-court-100 hover:border-court-300/40"
+          }"
+        >
+          ${escapeHtml(option.label)}
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderDoublesIndividualStatsCard(match, playerIndex, stats) {
+  return `
+    <article class="rounded-[1.75rem] border border-white/10 bg-court-900/80 p-4">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">${playerIndex < 2 ? "Team A" : "Team B"}</p>
+          <h3 class="mt-2 text-lg font-semibold text-white">${escapeHtml(playerName(match, playerIndex))}</h3>
+        </div>
+      </div>
+      <div class="mt-4 grid gap-3 sm:grid-cols-2">
+        ${renderMetric("1st Serve %", formatPercent(stats.firstServeIn, stats.firstServeAttempts), formatFraction(stats.firstServeIn, stats.firstServeAttempts))}
+        ${renderMetric("2nd Serve %", formatPercent(stats.secondServeIn, stats.secondServeAttempts), formatFraction(stats.secondServeIn, stats.secondServeAttempts))}
+        ${renderMetric("1st SPW %", formatPercent(stats.firstServePointsWon, stats.firstServeIn), formatFraction(stats.firstServePointsWon, stats.firstServeIn))}
+        ${renderMetric("2nd SPW %", formatPercent(stats.secondServePointsWon, stats.secondServeIn), formatFraction(stats.secondServePointsWon, stats.secondServeIn))}
+        ${renderMetric("Aces", String(stats.aces))}
+        ${renderMetric("Double Faults", String(stats.doubleFaults))}
+        ${renderMetric("Return Pts Won %", formatPercent(stats.returnPointsWon, stats.returnPoints), formatFraction(stats.returnPointsWon, stats.returnPoints))}
+        ${renderMetric("Return Winners", String(stats.returnWinners))}
+        ${renderMetric("Winners Hit", String(stats.winnersHit))}
+        ${renderMetric("UE Made", String(stats.unforcedErrors))}
+        ${renderMetric("Forcing Shots", String(stats.forcingShots))}
+        ${renderMetric("Net Win %", formatPercent(stats.netPointsWon, stats.netPointsPlayed), formatFraction(stats.netPointsWon, stats.netPointsPlayed))}
+        ${renderMetric("Net Points", String(stats.netPointsPlayed))}
+        ${renderMetric("Back Win %", formatPercent(stats.backPointsWon, stats.backPointsPlayed), formatFraction(stats.backPointsWon, stats.backPointsPlayed))}
+        ${renderMetric("Back Points", String(stats.backPointsPlayed))}
+      </div>
+    </article>
+  `;
+}
+
 function pointDescription(point) {
   const rallyLength = normalizeRallyLength(point.rallyLength);
   const contextMatch = currentMatch();
@@ -4174,7 +4369,7 @@ function pointDescription(point) {
     .join(" · ");
 }
 
-function renderStats(view) {
+function renderSinglesStats(view) {
   const { match, computed } = view;
   const setTabs = ["Overall", ...computed.statsBySet.map((_, index) => `Set ${index + 1}`)];
   const sections = [
@@ -4209,6 +4404,71 @@ function renderStats(view) {
         .join("")}
     </section>
   `;
+}
+
+function renderDoublesStats(view) {
+  const { match, computed } = view;
+  const options = [
+    { key: "overall", label: "Overall", stats: computed.statsOverall, score: "" },
+    ...computed.statsBySet.map((stats, index) => ({
+      key: `set-${index}`,
+      label: statsSetLabel(computed, index),
+      stats,
+      score: statsSetScore(computed, index),
+    })),
+  ];
+  const selectedKey = options.some((option) => option.key === state.stats.setFilter)
+    ? state.stats.setFilter
+    : "overall";
+  const selectedOption = options.find((option) => option.key === selectedKey) || options[0];
+  const playerStats = computeDoublesIndividualStats(match, computed, selectedKey);
+
+  return `
+    <section class="space-y-5">
+      <div class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Stats View</p>
+            <h2 class="mt-2 text-xl font-semibold text-white">${escapeHtml(selectedOption.label)}</h2>
+          </div>
+          ${selectedOption.score ? `<span class="rounded-full bg-white/5 px-4 py-2 text-sm text-court-200/70">${selectedOption.score}</span>` : ""}
+        </div>
+        <div class="mt-4">
+          ${renderStatsSetFilter(options, selectedKey)}
+        </div>
+        <div class="mt-5">
+          ${renderStatsTable(match, selectedOption.stats)}
+        </div>
+      </div>
+      <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
+        <button data-action="stats-toggle-doubles-individuals" class="flex w-full items-center justify-between gap-3 text-left">
+          <div>
+            <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Breakout</p>
+            <h2 class="mt-2 text-xl font-semibold text-white">Individual Player Stats</h2>
+          </div>
+          <span class="rounded-full border border-white/10 px-4 py-2 text-sm text-court-100">
+            ${state.stats.showDoublesIndividuals ? "Hide" : "Show"}
+          </span>
+        </button>
+        ${
+          state.stats.showDoublesIndividuals
+            ? `
+              <div class="mt-5 grid gap-4 lg:grid-cols-2">
+                ${playerStats.map((stats, playerIndex) => renderDoublesIndividualStatsCard(match, playerIndex, stats)).join("")}
+              </div>
+            `
+            : ""
+        }
+      </section>
+    </section>
+  `;
+}
+
+function renderStats(view) {
+  if (view.match.matchType === "doubles") {
+    return renderDoublesStats(view);
+  }
+  return renderSinglesStats(view);
 }
 
 function renderMatches() {
@@ -4429,6 +4689,16 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "tab") {
     state.currentTab = target.dataset.tab;
+    render();
+    return;
+  }
+  if (action === "stats-set-filter") {
+    state.stats.setFilter = target.dataset.value || "overall";
+    render();
+    return;
+  }
+  if (action === "stats-toggle-doubles-individuals") {
+    state.stats.showDoublesIndividuals = !state.stats.showDoublesIndividuals;
     render();
     return;
   }
@@ -4686,6 +4956,10 @@ document.addEventListener("click", async (event) => {
     state.currentMatchId = "";
     state.currentTab = "live";
     state.setup = createInitialSetupState();
+    state.stats = {
+      setFilter: "overall",
+      showDoublesIndividuals: false,
+    };
     resetDrafts();
     render();
     return;
