@@ -31,11 +31,18 @@ function createInitialDoublesSetup() {
     teamA: { player1: "", player2: "" },
     teamB: { player1: "", player2: "" },
     scoringFormat: "ad",
-    serveOrder: [null, null, null, null],
-    receiveFormation: {
-      teamA: { deuce: 0, ad: 1 },
-      teamB: { deuce: 2, ad: 3 },
-    },
+    serveOrder: [null],
+    firstReceiver: null,
+  };
+}
+
+function createInitialDoublesPrompt() {
+  return {
+    open: false,
+    type: "",
+    setIndex: 0,
+    firstServer: null,
+    firstReceiver: null,
   };
 }
 
@@ -76,6 +83,7 @@ const state = {
     editId: "",
     draft: createEmptyCheckpointDraft(),
   },
+  doublesPrompt: createInitialDoublesPrompt(),
   exportMessage: "",
   notice: "",
   noticeType: "success",
@@ -314,6 +322,9 @@ function getDoublesPlayerName(match, playerIndex) {
 }
 
 function getTeamIndex(playerIndex) {
+  if (!Number.isInteger(playerIndex)) {
+    return -1;
+  }
   return playerIndex < 2 ? 0 : 1;
 }
 
@@ -414,6 +425,10 @@ function normalizeOptionalDoublesPlayerIndex(value) {
   return next >= 0 && next <= 3 && Number.isInteger(next) ? next : null;
 }
 
+function hasStoredDoublesSetConfig(match, setIndex) {
+  return Array.isArray(match.setConfigs) && Boolean(match.setConfigs[setIndex]);
+}
+
 function sanitizeQuadStates(value) {
   const next = createEmptyQuadStates();
   if (!Array.isArray(value)) {
@@ -423,15 +438,21 @@ function sanitizeQuadStates(value) {
 }
 
 function normalizeDoublesServeOrder(serveOrder) {
-  if (!Array.isArray(serveOrder) || serveOrder.length < 4) {
+  if (!Array.isArray(serveOrder) || serveOrder.length === 0) {
     return [0, 2, 1, 3];
   }
   const normalized = serveOrder.map((playerIndex) => normalizeOptionalDoublesPlayerIndex(playerIndex));
   if (normalized.some((playerIndex) => playerIndex === null)) {
     return [0, 2, 1, 3];
   }
-  if (new Set(normalized).size !== 4) {
+  if (new Set(normalized).size !== normalized.length) {
     return [0, 2, 1, 3];
+  }
+  if (normalized.length < 4) {
+    return normalized;
+  }
+  if (normalized.length > 4) {
+    return normalized.slice(0, 4);
   }
   return normalized;
 }
@@ -449,10 +470,41 @@ function normalizeReceiveFormation(receiveFormation) {
   };
 }
 
+function deriveReceiveFormationFromFirstPattern(firstServer, firstReceiver) {
+  const normalizedFirstServer = normalizeOptionalDoublesPlayerIndex(firstServer);
+  const normalizedFirstReceiver = normalizeOptionalDoublesPlayerIndex(firstReceiver);
+  if (
+    normalizedFirstServer === null ||
+    normalizedFirstReceiver === null ||
+    getTeamIndex(normalizedFirstServer) === getTeamIndex(normalizedFirstReceiver)
+  ) {
+    return normalizeReceiveFormation(null);
+  }
+
+  const formation = normalizeReceiveFormation(null);
+  const receivingTeamKey = getTeamIndex(normalizedFirstReceiver) === 0 ? "teamA" : "teamB";
+  const servingTeamKey = getTeamIndex(normalizedFirstServer) === 0 ? "teamA" : "teamB";
+
+  formation[receivingTeamKey] = {
+    deuce: normalizedFirstReceiver,
+    ad: getPartnerIndex(normalizedFirstReceiver),
+  };
+  formation[servingTeamKey] = {
+    deuce: getPartnerIndex(normalizedFirstServer),
+    ad: normalizedFirstServer,
+  };
+  return formation;
+}
+
 function normalizeDoublesSetConfig(config) {
+  const serveOrder = normalizeDoublesServeOrder(config?.serveOrder);
+  const firstReceiver = normalizeOptionalDoublesPlayerIndex(config?.firstReceiver);
   return {
-    serveOrder: normalizeDoublesServeOrder(config?.serveOrder),
-    receiveFormation: normalizeReceiveFormation(config?.receiveFormation),
+    serveOrder,
+    firstReceiver,
+    receiveFormation: config?.receiveFormation
+      ? normalizeReceiveFormation(config.receiveFormation)
+      : deriveReceiveFormationFromFirstPattern(serveOrder[0] ?? null, firstReceiver),
   };
 }
 
@@ -468,6 +520,9 @@ function getDoublesSetConfig(match, setIndex, fallbackConfig = null) {
 
 function getDoublesServerForGame(setConfig, gameIndex) {
   const serveOrder = normalizeDoublesServeOrder(setConfig?.serveOrder);
+  if (serveOrder.length === 1 && gameIndex > 0) {
+    return serveOrder[0];
+  }
   return serveOrder[gameIndex % serveOrder.length];
 }
 
@@ -489,6 +544,40 @@ function getDoublesReceiver(match, setIndex, server, totalPointsInGame, setConfi
     return config.receiveFormation.teamA[courtSide];
   }
   return config.receiveFormation.teamB[courtSide];
+}
+
+function buildFullDoublesServeOrder(firstServer, secondServer) {
+  const normalizedFirstServer = normalizeOptionalDoublesPlayerIndex(firstServer);
+  const normalizedSecondServer = normalizeOptionalDoublesPlayerIndex(secondServer);
+  if (
+    normalizedFirstServer === null ||
+    normalizedSecondServer === null ||
+    getTeamIndex(normalizedFirstServer) === getTeamIndex(normalizedSecondServer)
+  ) {
+    return normalizeDoublesServeOrder(null);
+  }
+  return [
+    normalizedFirstServer,
+    normalizedSecondServer,
+    getPartnerIndex(normalizedFirstServer),
+    getPartnerIndex(normalizedSecondServer),
+  ];
+}
+
+function buildDeferredDoublesSetConfig(firstServer, firstReceiver, secondServer = null) {
+  const normalizedFirstServer = normalizeOptionalDoublesPlayerIndex(firstServer);
+  const normalizedFirstReceiver = normalizeOptionalDoublesPlayerIndex(firstReceiver);
+  if (secondServer === null) {
+    return {
+      serveOrder: [normalizedFirstServer],
+      firstReceiver: normalizedFirstReceiver,
+    };
+  }
+  return {
+    serveOrder: buildFullDoublesServeOrder(normalizedFirstServer, secondServer),
+    firstReceiver: normalizedFirstReceiver,
+    receiveFormation: deriveReceiveFormationFromFirstPattern(normalizedFirstServer, normalizedFirstReceiver),
+  };
 }
 
 function createDefaultDoublesNetPositions(server, receiver) {
@@ -808,6 +897,7 @@ function computeDoublesMatch(match) {
   let setsWon = [0, 0];
   let currentSet = createSetContainer(0);
   currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
+  let currentSetConfigMissing = !hasStoredDoublesSetConfig(match, currentSet.index);
   let currentSetConfig = getDoublesSetConfig(match, currentSet.index);
   let currentGame = null;
   let matchWinner = null;
@@ -833,6 +923,7 @@ function computeDoublesMatch(match) {
   function moveToNextSet(startServer) {
     currentSet = createSetContainer(currentSet.index + 1);
     currentSet.isMatchTiebreak = isMatchTiebreakSet(currentSet.index, setsWon);
+    currentSetConfigMissing = !hasStoredDoublesSetConfig(match, currentSet.index);
     currentSetConfig = alignServeOrderForGame(
       getDoublesSetConfig(match, currentSet.index, currentSetConfig),
       0,
@@ -1159,6 +1250,9 @@ function computeDoublesMatch(match) {
     ? getDoublesReceiver(match, currentSet.index, liveServer, currentGame.points.length, currentSetConfig)
     : getDoublesReceiver(match, currentSet.index, liveServer, 0, currentSetConfig);
   const isComplete = matchWinner !== null;
+  const completedGamesInLiveSet = currentSet.gamesWon[0] + currentSet.gamesWon[1];
+  const needsNewSetConfig = !isComplete && currentSet.index > 0 && currentSetConfigMissing;
+  const needsSecondServer = !isComplete && !needsNewSetConfig && currentSetConfig.serveOrder.length < 4 && completedGamesInLiveSet > 0;
 
   return {
     sets,
@@ -1182,6 +1276,9 @@ function computeDoublesMatch(match) {
         : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat)
       : ["0", "0"],
     liveSetConfig: currentSetConfig,
+    liveSetConfigMissing: currentSetConfigMissing,
+    needsNewSetConfig,
+    needsSecondServer,
     totalPoints: historyEntries.filter((entry) => entry.type === "point").length,
     flaggedPoints,
     historyEntries,
@@ -1627,6 +1724,119 @@ function resetDrafts() {
     editId: "",
     draft: createEmptyCheckpointDraft(),
   };
+  state.doublesPrompt = createInitialDoublesPrompt();
+}
+
+function closeDoublesPrompt() {
+  state.doublesPrompt = createInitialDoublesPrompt();
+}
+
+function ensureDoublesPrompt(view) {
+  if (
+    !view ||
+    view.match.matchType !== "doubles" ||
+    view.computed.matchWinner !== null ||
+    state.doublesPrompt.open ||
+    state.adjustment.open ||
+    Boolean(state.editor.entryId)
+  ) {
+    return false;
+  }
+
+  if (view.computed.needsNewSetConfig) {
+    state.doublesPrompt = {
+      open: true,
+      type: "new-set-config",
+      setIndex: view.computed.liveSetIndex,
+      firstServer: null,
+      firstReceiver: null,
+    };
+    return true;
+  }
+
+  if (view.computed.needsSecondServer) {
+    const firstServer = view.computed.liveSetConfig?.serveOrder?.[0] ?? null;
+    const firstReceiver = view.computed.liveSetConfig?.firstReceiver ?? null;
+    if (
+      normalizeOptionalDoublesPlayerIndex(firstServer) === null ||
+      normalizeOptionalDoublesPlayerIndex(firstReceiver) === null
+    ) {
+      return false;
+    }
+    state.doublesPrompt = {
+      open: true,
+      type: "second-server",
+      setIndex: view.computed.liveSetIndex,
+      firstServer,
+      firstReceiver,
+    };
+    return true;
+  }
+
+  return false;
+}
+
+async function saveDoublesSetConfig(match, setIndex, config) {
+  const nextSetConfigs = Array.isArray(match.setConfigs) ? [...match.setConfigs] : [];
+  nextSetConfigs[setIndex] = config;
+  match.setConfigs = nextSetConfigs;
+  await saveMatch(match);
+}
+
+async function applyDoublesNewSetConfig() {
+  const view = derivedCurrentMatch();
+  if (!view || view.match.matchType !== "doubles") {
+    return;
+  }
+  const { setIndex, firstServer, firstReceiver } = state.doublesPrompt;
+  const normalizedFirstServer = normalizeOptionalDoublesPlayerIndex(firstServer);
+  const normalizedFirstReceiver = normalizeOptionalDoublesPlayerIndex(firstReceiver);
+  if (
+    normalizedFirstServer === null ||
+    normalizedFirstReceiver === null ||
+    getTeamIndex(normalizedFirstServer) === getTeamIndex(normalizedFirstReceiver)
+  ) {
+    state.error = "Pick a first server and first receiver from the other team.";
+    render();
+    return;
+  }
+  await saveDoublesSetConfig(
+    view.match,
+    setIndex,
+    buildDeferredDoublesSetConfig(normalizedFirstServer, normalizedFirstReceiver)
+  );
+  closeDoublesPrompt();
+  state.error = "";
+  render();
+}
+
+async function applyDoublesSecondServer(secondServer) {
+  const view = derivedCurrentMatch();
+  if (!view || view.match.matchType !== "doubles") {
+    return;
+  }
+  const { setIndex, firstServer, firstReceiver } = state.doublesPrompt;
+  const normalizedFirstServer = normalizeOptionalDoublesPlayerIndex(firstServer);
+  const normalizedFirstReceiver = normalizeOptionalDoublesPlayerIndex(firstReceiver);
+  const normalizedSecondServer = normalizeOptionalDoublesPlayerIndex(secondServer);
+  if (
+    normalizedFirstServer === null ||
+    normalizedFirstReceiver === null ||
+    normalizedSecondServer === null ||
+    getTeamIndex(normalizedFirstServer) === getTeamIndex(normalizedSecondServer)
+  ) {
+    state.error = "Pick the second server from the other team.";
+    render();
+    return;
+  }
+  await saveDoublesSetConfig(
+    view.match,
+    setIndex,
+    buildDeferredDoublesSetConfig(normalizedFirstServer, normalizedFirstReceiver, normalizedSecondServer)
+  );
+  closeDoublesPrompt();
+  state.error = "";
+  render();
 }
 
 async function bootstrap() {
@@ -2663,8 +2873,15 @@ async function createMatchFromSetup() {
       render();
       return;
     }
-    if (!doublesSetup.serveOrder.every((playerIndex) => Number.isInteger(playerIndex))) {
-      state.error = "Complete the Set 1 serve order.";
+    const firstServer = normalizeOptionalDoublesPlayerIndex(doublesSetup.serveOrder[0]);
+    const firstReceiver = normalizeOptionalDoublesPlayerIndex(doublesSetup.firstReceiver);
+    if (firstServer === null) {
+      state.error = "Pick the first server.";
+      render();
+      return;
+    }
+    if (firstReceiver === null || getTeamIndex(firstServer) === getTeamIndex(firstReceiver)) {
+      state.error = "Pick the first receiver from the other team.";
       render();
       return;
     }
@@ -2674,13 +2891,7 @@ async function createMatchFromSetup() {
       teamA,
       teamB,
       setConfigs: [
-        {
-          serveOrder: [...doublesSetup.serveOrder],
-          receiveFormation: {
-            teamA: { ...doublesSetup.receiveFormation.teamA },
-            teamB: { ...doublesSetup.receiveFormation.teamB },
-          },
-        },
+        buildDeferredDoublesSetConfig(firstServer, firstReceiver),
       ],
     });
     await saveMatch(match);
@@ -3504,7 +3715,7 @@ function renderDoublesFormationOptions(teamKey, label, players, formation) {
 function renderDoublesSetup() {
   const doublesSetup = state.setup.doublesSetup;
   const firstServer = doublesSetup.serveOrder[0];
-  const secondServer = doublesSetup.serveOrder[1];
+  const firstReceiver = normalizeOptionalDoublesPlayerIndex(doublesSetup.firstReceiver);
   const teamAPlayers = [
     { index: 0, name: doublesPlayerLabel(doublesSetup, 0) },
     { index: 1, name: doublesPlayerLabel(doublesSetup, 1) },
@@ -3514,10 +3725,9 @@ function renderDoublesSetup() {
     { index: 3, name: doublesPlayerLabel(doublesSetup, 3) },
   ];
   const firstServerOptions = [...teamAPlayers, ...teamBPlayers];
-  const secondServerOptions = firstServer === null
+  const firstReceiverOptions = firstServer === null
     ? []
     : firstServerOptions.filter((player) => getTeamIndex(player.index) !== getTeamIndex(firstServer));
-  const serveOrderComplete = doublesSetup.serveOrder.every((playerIndex) => Number.isInteger(playerIndex));
 
   return `
     <div class="mt-6 space-y-5">
@@ -3556,10 +3766,10 @@ function renderDoublesSetup() {
         "grid-cols-2"
       )}
       <div class="rounded-[1.75rem] border border-white/10 bg-white/5 p-4">
-        <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Set 1 Serve Order</p>
+        <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Set 1 Opening Rotation</p>
         <div class="mt-4 space-y-4">
           <div>
-            <p class="mb-3 text-sm font-semibold text-white">1st Server</p>
+            <p class="mb-3 text-sm font-semibold text-white">Who Serves First?</p>
             <div class="grid gap-3 sm:grid-cols-2">
               ${firstServerOptions.map((player) => `
                 <button
@@ -3580,14 +3790,14 @@ function renderDoublesSetup() {
             firstServer !== null
               ? `
                 <div>
-                  <p class="mb-3 text-sm font-semibold text-white">2nd Server</p>
+                  <p class="mb-3 text-sm font-semibold text-white">Who Receives First?</p>
                   <div class="grid gap-3 sm:grid-cols-2">
-                    ${secondServerOptions.map((player) => `
+                    ${firstReceiverOptions.map((player) => `
                       <button
-                        data-action="setup-doubles-second-server"
+                        data-action="setup-doubles-first-receiver"
                         data-value="${player.index}"
                         class="rounded-2xl border px-4 py-4 text-sm font-medium ${
-                          secondServer === player.index
+                          firstReceiver === player.index
                             ? "border-court-300 bg-court-300 text-court-950"
                             : "border-white/10 bg-court-950/30 text-court-100"
                         }"
@@ -3600,22 +3810,14 @@ function renderDoublesSetup() {
               `
               : ""
           }
-          ${
-            serveOrderComplete
-              ? `<div class="rounded-2xl border border-court-300/25 bg-court-300/10 px-4 py-4 text-sm text-court-100">
-                  1st: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[0]))}</span>
-                  &rarr; 2nd: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[1]))}</span>
-                  &rarr; 3rd: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[2]))}</span>
-                  &rarr; 4th: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[3]))}</span>
-                </div>`
-              : `<p class="text-sm text-court-200/65">${firstServer === null ? "Pick any player to serve first." : "Pick the second server from the other team."}</p>`
-          }
+          <p class="text-sm text-court-200/65">${
+            firstServer === null
+              ? "Pick any player to serve first."
+              : firstReceiver === null
+                ? "Pick the first receiver from the other team."
+                : `${escapeHtml(doublesPlayerLabel(doublesSetup, firstServer))} serves first to ${escapeHtml(doublesPlayerLabel(doublesSetup, firstReceiver))}.`
+          }</p>
         </div>
-      </div>
-      <div class="space-y-4">
-        <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Set 1 Receive Formation</p>
-        ${renderDoublesFormationOptions("teamA", "Team A", teamAPlayers, doublesSetup.receiveFormation.teamA)}
-        ${renderDoublesFormationOptions("teamB", "Team B", teamBPlayers, doublesSetup.receiveFormation.teamB)}
       </div>
       <button data-action="start-match" class="w-full rounded-2xl bg-court-300 px-5 py-5 text-base font-semibold text-court-950 transition hover:bg-court-200">
         Start Match
@@ -4640,6 +4842,100 @@ function renderAdjustScoreModal(view) {
   `;
 }
 
+function renderDoublesPromptModal(view) {
+  if (!state.doublesPrompt.open || view.match.matchType !== "doubles") {
+    return "";
+  }
+
+  const { match } = view;
+  const prompt = state.doublesPrompt;
+  const allPlayers = [0, 1, 2, 3].map((playerIndex) => ({
+    index: playerIndex,
+    name: playerName(match, playerIndex),
+  }));
+  const firstServer = normalizeOptionalDoublesPlayerIndex(prompt.firstServer);
+  const firstReceiver = normalizeOptionalDoublesPlayerIndex(prompt.firstReceiver);
+  const secondServerOptions = firstServer === null
+    ? []
+    : allPlayers.filter((player) => getTeamIndex(player.index) !== getTeamIndex(firstServer));
+  const firstReceiverOptions = firstServer === null
+    ? []
+    : allPlayers.filter((player) => getTeamIndex(player.index) !== getTeamIndex(firstServer));
+  const title = prompt.type === "second-server" ? "Who Serves Game 2?" : `Set ${prompt.setIndex + 1} Setup`;
+  const description = prompt.type === "second-server"
+    ? "Game 1 is complete. Pick the next server from the other team."
+    : "Pick the opening server and receiver for this set.";
+
+  return `
+    <div class="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
+      <div class="max-h-[95vh] w-full max-w-2xl overflow-auto rounded-[2rem] border border-white/10 bg-court-950 p-5">
+        <div>
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Doubles Rotation</p>
+          <p class="mt-2 text-lg font-semibold text-white">${escapeHtml(title)}</p>
+          <p class="mt-2 text-sm text-court-200/60">${escapeHtml(description)}</p>
+        </div>
+        ${
+          prompt.type === "second-server"
+            ? `
+              <div class="mt-5 grid gap-3 sm:grid-cols-2">
+                ${secondServerOptions.map((player) => `
+                  <button
+                    data-action="doubles-prompt-second-server"
+                    data-value="${player.index}"
+                    class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-medium text-court-100 transition hover:border-court-300/50"
+                  >
+                    ${escapeHtml(player.name)}
+                  </button>
+                `).join("")}
+              </div>
+            `
+            : `
+              <div class="mt-5 space-y-5">
+                <div>
+                  <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Serves First?</p>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    ${allPlayers.map((player) => `
+                      <button
+                        data-action="doubles-prompt-first-server"
+                        data-value="${player.index}"
+                        class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+                          firstServer === player.index
+                            ? "border-court-300 bg-court-300 text-court-950"
+                            : "border-white/10 bg-white/5 text-court-100"
+                        }"
+                      >
+                        ${escapeHtml(player.name)}
+                      </button>
+                    `).join("")}
+                  </div>
+                </div>
+                <div>
+                  <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Receives First?</p>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    ${firstReceiverOptions.map((player) => `
+                      <button
+                        data-action="doubles-prompt-first-receiver"
+                        data-value="${player.index}"
+                        class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+                          firstReceiver === player.index
+                            ? "border-court-300 bg-court-300 text-court-950"
+                            : "border-white/10 bg-white/5 text-court-100"
+                        }"
+                      >
+                        ${escapeHtml(player.name)}
+                      </button>
+                    `).join("")}
+                  </div>
+                </div>
+                <button data-action="doubles-prompt-submit" class="w-full rounded-2xl bg-court-300 px-5 py-4 text-sm font-semibold text-court-950">Save Set Setup</button>
+              </div>
+            `
+        }
+      </div>
+    </div>
+  `;
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -4658,6 +4954,10 @@ function render() {
     return;
   }
   const view = derivedCurrentMatch();
+  if (view && ensureDoublesPrompt(view)) {
+    render();
+    return;
+  }
   const hasMatch = Boolean(view);
   const body = !hasMatch && state.currentTab !== "matches"
     ? renderSetup()
@@ -4694,7 +4994,7 @@ function render() {
                 : renderMatches()
         }
       </div>
-      ${hasMatch ? `${renderEditorModal(view)}${renderAdjustScoreModal(view)}` : ""}
+      ${hasMatch ? `${renderEditorModal(view)}${renderAdjustScoreModal(view)}${renderDoublesPromptModal(view)}` : ""}
     `;
   app.innerHTML = body;
 }
@@ -4733,22 +5033,21 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "setup-doubles-first-server") {
     const firstServer = Number(target.dataset.value);
-    state.setup.doublesSetup.serveOrder = [firstServer, null, getPartnerIndex(firstServer), null];
+    state.setup.doublesSetup.serveOrder = [firstServer];
+    const currentFirstReceiver = normalizeOptionalDoublesPlayerIndex(state.setup.doublesSetup.firstReceiver);
+    if (currentFirstReceiver !== null && getTeamIndex(firstServer) === getTeamIndex(currentFirstReceiver)) {
+      state.setup.doublesSetup.firstReceiver = null;
+    }
     render();
     return;
   }
-  if (action === "setup-doubles-second-server") {
-    const secondServer = Number(target.dataset.value);
+  if (action === "setup-doubles-first-receiver") {
+    const firstReceiver = Number(target.dataset.value);
     const firstServer = state.setup.doublesSetup.serveOrder[0];
-    if (!Number.isInteger(firstServer) || getTeamIndex(firstServer) === getTeamIndex(secondServer)) {
+    if (!Number.isInteger(firstServer) || getTeamIndex(firstServer) === getTeamIndex(firstReceiver)) {
       return;
     }
-    state.setup.doublesSetup.serveOrder = [
-      firstServer,
-      secondServer,
-      getPartnerIndex(firstServer),
-      getPartnerIndex(secondServer),
-    ];
+    state.setup.doublesSetup.firstReceiver = firstReceiver;
     render();
     return;
   }
@@ -4767,15 +5066,39 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
-  if (action === "setup-doubles-formation") {
-    const teamKey = target.dataset.team;
-    if (teamKey !== "teamA" && teamKey !== "teamB") {
+  if (action === "doubles-prompt-first-server") {
+    const firstServer = normalizeOptionalDoublesPlayerIndex(target.dataset.value);
+    if (firstServer === null) {
       return;
     }
-    const baseIndex = teamKey === "teamA" ? 0 : 2;
-    state.setup.doublesSetup.receiveFormation[teamKey] = target.dataset.value === "second"
-      ? { deuce: baseIndex + 1, ad: baseIndex }
-      : { deuce: baseIndex, ad: baseIndex + 1 };
+    state.doublesPrompt.firstServer = firstServer;
+    const currentFirstReceiver = normalizeOptionalDoublesPlayerIndex(state.doublesPrompt.firstReceiver);
+    if (currentFirstReceiver !== null && getTeamIndex(firstServer) === getTeamIndex(currentFirstReceiver)) {
+      state.doublesPrompt.firstReceiver = null;
+    }
+    render();
+    return;
+  }
+  if (action === "doubles-prompt-first-receiver") {
+    const firstReceiver = normalizeOptionalDoublesPlayerIndex(target.dataset.value);
+    const firstServer = normalizeOptionalDoublesPlayerIndex(state.doublesPrompt.firstServer);
+    if (firstReceiver === null || firstServer === null || getTeamIndex(firstServer) === getTeamIndex(firstReceiver)) {
+      return;
+    }
+    state.doublesPrompt.firstReceiver = firstReceiver;
+    render();
+    return;
+  }
+  if (action === "doubles-prompt-submit") {
+    await applyDoublesNewSetConfig();
+    return;
+  }
+  if (action === "doubles-prompt-second-server") {
+    await applyDoublesSecondServer(target.dataset.value);
+    return;
+  }
+  if (action === "doubles-prompt-cancel") {
+    closeDoublesPrompt();
     render();
     return;
   }
