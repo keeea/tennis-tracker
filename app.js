@@ -131,6 +131,7 @@ function createEmptyCheckpointDraft() {
     setScore: ["0", "0"],
     gameScore: ["0", "0"],
     server: "0",
+    receiver: null,
     isTiebreak: false,
   };
 }
@@ -910,6 +911,7 @@ function computeDoublesMatch(match) {
       index: currentSet.games.length,
       setIndex: currentSet.index,
       server: serverOverride,
+      receiverOverride: null,
       isTiebreak: shouldUseTiebreakGame(currentSet.gamesWon, isMatchTiebreak),
       isSuperTiebreak: isMatchTiebreak,
       pointsWon: [...pointsWon],
@@ -1002,6 +1004,7 @@ function computeDoublesMatch(match) {
       const setScore = sanitizeNumericScorePair(rawEntry.setScore, currentSet.gamesWon);
       const fallbackServer = getDoublesServerForGame(currentSetConfig, setScore[0] + setScore[1]);
       const server = normalizeOptionalDoublesPlayerIndex(rawEntry.server) ?? fallbackServer;
+      const receiver = normalizeOptionalDoublesPlayerIndex(rawEntry.receiver);
       const useTiebreak = shouldUseTiebreakGame(setScore, currentSet.isMatchTiebreak);
       const gameScore = sanitizeNumericScorePair(rawEntry.gameScore, [0, 0]);
       currentSetConfig = alignServeOrderForGame(currentSetConfig, setScore[0] + setScore[1], server);
@@ -1014,6 +1017,7 @@ function computeDoublesMatch(match) {
         gameIndex: checkpointGameIndex(currentSet, currentGame),
         pointNumber: null,
         server,
+        receiver,
         setScore: [...setScore],
         gameScore: [...gameScore],
         isTiebreak: useTiebreak,
@@ -1031,6 +1035,7 @@ function computeDoublesMatch(match) {
           finalizeSetFromCheckpoint(server, gameScore);
         } else {
           startGame(server, gameScore);
+          currentGame.receiverOverride = receiver;
         }
         return;
       }
@@ -1044,6 +1049,7 @@ function computeDoublesMatch(match) {
       }
 
       startGame(server, gameScore);
+      currentGame.receiverOverride = receiver;
       return;
     }
 
@@ -1055,7 +1061,8 @@ function computeDoublesMatch(match) {
     const server = currentGame.isTiebreak
       ? getDoublesServerForTiebreakPoint(currentSetConfig, currentGame.index, pointInGame)
       : currentGame.server;
-    const receiver = getDoublesReceiver(match, currentSet.index, server, pointInGame, currentSetConfig);
+    const receiver = currentGame.receiverOverride ?? getDoublesReceiver(match, currentSet.index, server, pointInGame, currentSetConfig);
+    currentGame.receiverOverride = null;
     const serverTeam = getTeamIndex(server);
     const receiverTeam = 1 - serverTeam;
     const normalizedPoint = normalizeStoredPoint(rawEntry);
@@ -1247,7 +1254,7 @@ function computeDoublesMatch(match) {
       : currentGame.server
     : getDoublesServerForGame(currentSetConfig, currentSet.games.length);
   const liveReceiver = currentGame
-    ? getDoublesReceiver(match, currentSet.index, liveServer, currentGame.points.length, currentSetConfig)
+    ? currentGame.receiverOverride ?? getDoublesReceiver(match, currentSet.index, liveServer, currentGame.points.length, currentSetConfig)
     : getDoublesReceiver(match, currentSet.index, liveServer, 0, currentSetConfig);
   const isComplete = matchWinner !== null;
   const completedGamesInLiveSet = currentSet.gamesWon[0] + currentSet.gamesWon[1];
@@ -1885,6 +1892,9 @@ function encodeDataForExport(match) {
           server: normalizeMatchType(match.matchType) === "doubles"
             ? normalizeOptionalDoublesPlayerIndex(entry.server) ?? 0
             : Number(entry.server) === 1 ? 1 : 0,
+          receiver: normalizeMatchType(match.matchType) === "doubles"
+            ? normalizeOptionalDoublesPlayerIndex(entry.receiver)
+            : undefined,
           timestamp: entry.timestamp,
         }
         : {
@@ -2109,6 +2119,7 @@ function validateImportedPoint(point) {
       setScore: sanitizeNumericScorePair(point.setScore, [0, 0]),
       gameScore: sanitizeNumericScorePair(point.gameScore, [0, 0]),
       server: normalizeOptionalDoublesPlayerIndex(point.server) ?? (Number(point.server) === 1 ? 1 : 0),
+      receiver: normalizeOptionalDoublesPlayerIndex(point.receiver),
       timestamp: typeof point.timestamp === "string" && point.timestamp ? point.timestamp : new Date().toISOString(),
     };
   }
@@ -2267,6 +2278,68 @@ function parsePlayerList(value, nameToIndex) {
         return nameToIndex.get(name);
       })
   )];
+}
+
+function parseDoublesWinnerTeam(value) {
+  const next = String(value || "").trim();
+  if (!next) {
+    throw new Error("Doubles CSV export is missing winner team values.");
+  }
+  if (next.startsWith("Team A")) {
+    return 0;
+  }
+  if (next.startsWith("Team B")) {
+    return 1;
+  }
+  throw new Error(`Unknown winner team "${next}" in doubles CSV import.`);
+}
+
+function parseDoublesTeamNames(value, teamLabel) {
+  const next = String(value || "").trim();
+  const prefix = `${teamLabel} (`;
+  if (!next.startsWith(prefix) || !next.endsWith(")")) {
+    throw new Error(`Doubles CSV export has an invalid ${teamLabel} label.`);
+  }
+  const body = next.slice(prefix.length, -1);
+  const players = body.split(" & ").map((entry) => entry.trim()).filter(Boolean);
+  if (players.length !== 2) {
+    throw new Error(`Doubles CSV export has an invalid ${teamLabel} roster.`);
+  }
+  return {
+    player1: players[0],
+    player2: players[1],
+  };
+}
+
+function buildDoublesSetConfigsFromCsv(records, playerLookup) {
+  const recordsBySet = records.reduce((map, record) => {
+    const setIndex = Math.max(Number(record.set) - 1, 0);
+    if (!map.has(setIndex)) {
+      map.set(setIndex, []);
+    }
+    map.get(setIndex).push(record);
+    return map;
+  }, new Map());
+
+  return [...recordsBySet.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .reduce((configs, [setIndex, setRecords]) => {
+      const sorted = [...setRecords].sort((a, b) =>
+        Number(a.game) - Number(b.game) ||
+        Number(a.point) - Number(b.point)
+      );
+      const firstRecord = sorted[0];
+      const firstServer = playerLookup.get(firstRecord.server.trim());
+      const firstReceiver = playerLookup.get(firstRecord.receiver.trim());
+      if (!Number.isInteger(firstServer) || !Number.isInteger(firstReceiver)) {
+        throw new Error(`Unable to determine opening server/receiver for set ${setIndex + 1}.`);
+      }
+
+      const secondGameRecord = sorted.find((record) => Number(record.game) !== Number(firstRecord.game));
+      const secondServer = secondGameRecord ? playerLookup.get(secondGameRecord.server.trim()) : null;
+      configs[setIndex] = buildDeferredDoublesSetConfig(firstServer, firstReceiver, secondServer ?? null);
+      return configs;
+    }, []);
 }
 
 function parseCsv(text) {
@@ -2474,7 +2547,34 @@ function importMatchFromCsv(text) {
   ];
   const matchesNew = headers.length === expectedHeaders.length && headers.every((header, index) => header === expectedHeaders[index]);
   const matchesLegacy = headers.length === legacyHeaders.length && headers.every((header, index) => header === legacyHeaders[index]);
-  if (!matchesNew && !matchesLegacy) {
+  const doublesHeaders = [
+    "set",
+    "game",
+    "point",
+    "tiebreak",
+    "server",
+    "receiver",
+    "winner_team",
+    "serve_result",
+    "outcome",
+    "result_shot_player",
+    "result_shot_type",
+    "preceding_shot_player",
+    "preceding_shot_type",
+    "rally_length",
+    "score_before",
+    "score_after",
+    "break_point",
+    "net_p1",
+    "net_p2",
+    "net_p3",
+    "net_p4",
+    "return_winner_player",
+    "flagged",
+    "exclude_from_stats",
+  ];
+  const matchesDoubles = headers.length === doublesHeaders.length && headers.every((header, index) => header === doublesHeaders[index]);
+  if (!matchesNew && !matchesLegacy && !matchesDoubles) {
     throw new Error("CSV does not match the exported match format.");
   }
   if (rows.length < 2) {
@@ -2487,6 +2587,76 @@ function importMatchFromCsv(text) {
     }
     return Object.fromEntries(headers.map((header, index) => [header, row[index]]));
   });
+
+  if (matchesDoubles) {
+    const teamARecord = records.find((record) => String(record.winner_team || "").startsWith("Team A"));
+    const teamBRecord = records.find((record) => String(record.winner_team || "").startsWith("Team B"));
+    if (!teamARecord || !teamBRecord) {
+      throw new Error("Doubles CSV export is missing team labels.");
+    }
+
+    const teamA = parseDoublesTeamNames(teamARecord.winner_team, "Team A");
+    const teamB = parseDoublesTeamNames(teamBRecord.winner_team, "Team B");
+    const playerLookup = new Map([
+      [teamA.player1, 0],
+      [teamA.player2, 1],
+      [teamB.player1, 2],
+      [teamB.player2, 3],
+    ]);
+
+    records.forEach((record) => {
+      ["server", "receiver"].forEach((field) => {
+        const name = record[field]?.trim();
+        if (!playerLookup.has(name)) {
+          throw new Error(`Unknown player "${name}" in doubles CSV import.`);
+        }
+      });
+      ["result_shot_player", "preceding_shot_player", "return_winner_player"].forEach((field) => {
+        const name = record[field]?.trim();
+        if (name && !playerLookup.has(name)) {
+          throw new Error(`Unknown player "${name}" in doubles CSV import.`);
+        }
+      });
+      parseDoublesWinnerTeam(record.winner_team);
+    });
+
+    const sortedRecords = [...records].sort((a, b) =>
+      Number(a.set) - Number(b.set) ||
+      Number(a.game) - Number(b.game) ||
+      Number(a.point) - Number(b.point)
+    );
+    const points = sortedRecords.map((record) => validateImportedPoint({
+      id: crypto.randomUUID(),
+      serveResult: record.serve_result,
+      outcome: record.outcome,
+      resultShotPlayer: record.result_shot_player.trim() ? playerLookup.get(record.result_shot_player.trim()) : null,
+      resultShotType: record.result_shot_type,
+      precedingShotPlayer: record.preceding_shot_player.trim() ? playerLookup.get(record.preceding_shot_player.trim()) : null,
+      precedingShotType: record.preceding_shot_type,
+      rallyLength: record.rally_length,
+      winner: parseDoublesWinnerTeam(record.winner_team),
+      netPositions: [
+        record.net_p1 === "net" ? 1 : record.net_p1 === "back" ? 0 : null,
+        record.net_p2 === "net" ? 1 : record.net_p2 === "back" ? 0 : null,
+        record.net_p3 === "net" ? 1 : record.net_p3 === "back" ? 0 : null,
+        record.net_p4 === "net" ? 1 : record.net_p4 === "back" ? 0 : null,
+      ],
+      returnWinnerPlayer: record.return_winner_player.trim() ? playerLookup.get(record.return_winner_player.trim()) : null,
+      flagged: record.flagged === "yes",
+      excludeFromStats: record.exclude_from_stats === "yes",
+    }));
+
+    const importedMatch = createImportedMatch({
+      matchType: "doubles",
+      scoringFormat: "ad",
+      teamA,
+      teamB,
+      setConfigs: buildDoublesSetConfigsFromCsv(sortedRecords, playerLookup),
+      points,
+    });
+    validateImportedMatchShape(importedMatch);
+    return importedMatch;
+  }
 
   const firstRecord = records[0];
   const playerA = firstRecord.server?.trim();
@@ -2737,6 +2907,7 @@ function getCheckpointDraftFromComputed(computed) {
     setScore: computed.liveSetGames.map(String),
     gameScore: computed.liveGamePoints.map(String),
     server: String(computed.liveServer),
+    receiver: computed.liveReceiver != null ? String(computed.liveReceiver) : null,
     isTiebreak: computed.liveGameIsTiebreak || computed.liveSetIsMatchTiebreak,
   };
 }
@@ -2746,6 +2917,7 @@ function getCheckpointDraftFromEntry(entry) {
     setScore: sanitizeNumericScorePair(entry.setScore, [0, 0]).map(String),
     gameScore: sanitizeNumericScorePair(entry.gameScore, [0, 0]).map(String),
     server: String(entry.server),
+    receiver: entry.receiver != null ? String(entry.receiver) : null,
     isTiebreak: Boolean(entry.isTiebreak || entry.isSuperTiebreak),
   };
 }
@@ -2761,11 +2933,15 @@ function normalizeCheckpointDraft(draft) {
     server: match?.matchType === "doubles"
       ? normalizeOptionalDoublesPlayerIndex(draft.server) ?? 0
       : Number(draft.server) === 1 ? 1 : 0,
+    receiver: match?.matchType === "doubles"
+      ? normalizeOptionalDoublesPlayerIndex(draft.receiver)
+      : null,
     isTiebreak,
   };
 }
 
 function validateCheckpointDraft(draft) {
+  const match = currentMatch();
   const normalized = normalizeCheckpointDraft(draft);
   const [setA, setB] = normalized.setScore;
   const [gameA, gameB] = normalized.gameScore;
@@ -2778,6 +2954,13 @@ function validateCheckpointDraft(draft) {
   }
   if (!normalized.isTiebreak && gameA === 4 && gameB === 4) {
     return "Both players cannot have Ad at the same time.";
+  }
+  if (
+    match?.matchType === "doubles" &&
+    normalized.receiver !== null &&
+    getTeamIndex(normalized.server) === getTeamIndex(normalized.receiver)
+  ) {
+    return "Receiver must be from the other team.";
   }
   return "";
 }
@@ -2836,6 +3019,7 @@ async function applyCheckpointDraft() {
     setScore: normalized.setScore,
     gameScore: normalized.gameScore,
     server: normalized.server,
+    receiver: view.match.matchType === "doubles" ? normalized.receiver : undefined,
     timestamp: new Date().toISOString(),
   };
 
@@ -4308,14 +4492,14 @@ function renderHistory(view) {
                     (entry) => entry.type === "checkpoint"
                       ? `
                     <article class="rounded-2xl border border-sky-400/30 bg-sky-400/10 p-4">
-                      <div class="flex items-start justify-between gap-4">
-                        <div>
-                          <p class="font-semibold text-white">Score Adjustment</p>
-                          <p class="mt-1 text-sm text-court-200/70">Adjusted to set ${entry.setScore[0]}-${entry.setScore[1]} · game ${entry.gameScore[0]}-${entry.gameScore[1]} · ${playerName(match, entry.server)} serving</p>
-                          <p class="mt-2 text-sm text-court-200/55">${entry.isSuperTiebreak ? "Super tiebreak checkpoint" : entry.isTiebreak ? "Tiebreak checkpoint" : "Standard game checkpoint"}</p>
-                        </div>
-                        <div class="flex gap-2">
-                          <button data-action="edit-point" data-id="${entry.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="font-semibold text-white">Score Adjustment</p>
+            <p class="mt-1 text-sm text-court-200/70">Adjusted to set ${entry.setScore[0]}-${entry.setScore[1]} · game ${entry.gameScore[0]}-${entry.gameScore[1]} · ${playerName(match, entry.server)} serving${match.matchType === "doubles" && entry.receiver != null ? ` · ${playerName(match, entry.receiver)} receiving` : ""}</p>
+            <p class="mt-2 text-sm text-court-200/55">${entry.isSuperTiebreak ? "Super tiebreak checkpoint" : entry.isTiebreak ? "Tiebreak checkpoint" : "Standard game checkpoint"}</p>
+          </div>
+          <div class="flex gap-2">
+            <button data-action="edit-point" data-id="${entry.id}" class="rounded-xl border border-white/10 px-3 py-2 text-sm text-court-100">Edit</button>
                           <button data-action="delete-point" data-id="${entry.id}" class="rounded-xl border border-red-400/30 px-3 py-2 text-sm text-red-300">Delete</button>
                         </div>
                       </div>
@@ -4771,6 +4955,7 @@ function renderAdjustScoreModal(view) {
   const standardOptions = ["0", "15", "30", "40", "Ad"];
   const title = state.adjustment.editId ? "Edit Score Adjustment" : "Adjust Score";
   const serverOptions = match.matchType === "doubles" ? [0, 1, 2, 3] : [0, 1];
+  const receiverOptions = match.matchType === "doubles" ? [0, 1, 2, 3] : [];
 
   return `
     <div class="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
@@ -4778,7 +4963,7 @@ function renderAdjustScoreModal(view) {
         <div class="flex items-start justify-between gap-3">
           <div>
             <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">${title}</p>
-            <p class="mt-2 text-sm text-court-200/60">Insert a checkpoint that forces the score and server from this point forward.</p>
+            <p class="mt-2 text-sm text-court-200/60">Force the score to the values below. The next point will start from this state.</p>
           </div>
           <button data-action="close-adjust-score" class="rounded-xl border border-white/10 px-4 py-3 text-sm text-court-100">Close</button>
         </div>
@@ -4819,7 +5004,7 @@ function renderAdjustScoreModal(view) {
             </div>
           </div>
           <div>
-            <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Is Serving?</p>
+            <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Serves the Next Point?</p>
             <div class="grid gap-3 ${match.matchType === "doubles" ? "grid-cols-2" : "grid-cols-2"}">
               ${serverOptions.map((playerIndex) => `
                 <button data-action="adjust-server" data-value="${playerIndex}" class="rounded-2xl border px-4 py-4 text-sm font-medium ${
@@ -4832,6 +5017,26 @@ function renderAdjustScoreModal(view) {
               `).join("")}
             </div>
           </div>
+          ${
+            match.matchType === "doubles"
+              ? `
+                <div>
+                  <p class="mb-3 text-xs uppercase tracking-[0.3em] text-court-300/70">Who Receives the Next Point?</p>
+                  <div class="grid grid-cols-2 gap-3">
+                    ${receiverOptions.map((playerIndex) => `
+                      <button data-action="adjust-receiver" data-value="${playerIndex}" class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+                        draft.receiver === String(playerIndex)
+                          ? "border-court-300 bg-court-300 text-court-950"
+                          : "border-white/10 bg-white/5 text-court-100"
+                      }">
+                        ${escapeHtml(playerName(match, playerIndex))}
+                      </button>
+                    `).join("")}
+                  </div>
+                </div>
+              `
+              : ""
+          }
           <div class="grid grid-cols-2 gap-3">
             <button data-action="close-adjust-score" class="rounded-2xl border border-white/10 px-5 py-4 text-sm text-court-100">Cancel</button>
             <button data-action="apply-adjust-score" class="rounded-2xl bg-court-300 px-5 py-4 text-sm font-semibold text-court-950">Apply</button>
@@ -5339,6 +5544,11 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "adjust-server") {
     updateAdjustmentDraft("server", target.dataset.value);
+    return;
+  }
+  if (action === "adjust-receiver") {
+    state.adjustment.draft.receiver = target.dataset.value;
+    render();
     return;
   }
   if (action === "toggle-adjust-tiebreak") {
