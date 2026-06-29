@@ -15,7 +15,7 @@ const OUTCOME_OPTIONS = [
   { value: "forced_error", label: "FE" },
   { value: "uncertain", label: "Uncertain" },
 ];
-const SHOT_OPTIONS = ["forehand", "backhand", "volley", "overhead", "drop_shot"];
+const SHOT_OPTIONS = ["forehand", "backhand", "volley", "overhead", "drop_shot", "serve"];
 const RALLY_LENGTH_OPTIONS = [
   { value: "short", label: "Short (1-4)" },
   { value: "long", label: "Long (5+)" },
@@ -108,7 +108,7 @@ function createEmptyDoublesDraft() {
     outcome: "uncertain",
     resultShotPlayer: null,
     resultShotType: "uncertain",
-    precedingShotPlayer: null,
+    precedingShotPlayer: "uncertain",
     precedingShotType: "uncertain",
     rallyLength: "uncertain",
     netPositions: createEmptyQuadStates(),
@@ -153,6 +153,7 @@ function createStatsBucket() {
       volley: 0,
       overhead: 0,
       drop_shot: 0,
+      serve: 0,
     },
     forcingShots: {
       forehand: 0,
@@ -160,6 +161,7 @@ function createStatsBucket() {
       volley: 0,
       overhead: 0,
       drop_shot: 0,
+      serve: 0,
     },
     unforcedErrors: {
       forehand: 0,
@@ -167,6 +169,7 @@ function createStatsBucket() {
       volley: 0,
       overhead: 0,
       drop_shot: 0,
+      serve: 0,
     },
     errorsAfterOpponentShot: {
       forehand: 0,
@@ -174,6 +177,7 @@ function createStatsBucket() {
       volley: 0,
       overhead: 0,
       drop_shot: 0,
+      serve: 0,
     },
     winnersAfterOpponentShot: {
       forehand: 0,
@@ -181,6 +185,7 @@ function createStatsBucket() {
       volley: 0,
       overhead: 0,
       drop_shot: 0,
+      serve: 0,
     },
     forcedErrors: 0,
     netPointsPlayed: 0,
@@ -402,6 +407,9 @@ function getTiebreakServer(startServer, pointIndex) {
 }
 
 function normalizeOptionalDoublesPlayerIndex(value) {
+  if (value === null || value === undefined || value === "uncertain") {
+    return null;
+  }
   const next = Number(value);
   return next >= 0 && next <= 3 && Number.isInteger(next) ? next : null;
 }
@@ -3013,13 +3021,19 @@ function setDoublesDraftValue(target, key, value) {
         : null;
     if (
       precedingTeam !== null &&
-      (draft.precedingShotPlayer === null || getTeamIndex(draft.precedingShotPlayer) !== precedingTeam)
+      (
+        normalizeOptionalDoublesPlayerIndex(draft.precedingShotPlayer) === null ||
+        getTeamIndex(normalizeOptionalDoublesPlayerIndex(draft.precedingShotPlayer)) !== precedingTeam
+      )
     ) {
       draft.precedingShotPlayer = null;
     }
     if (
       resultTeam !== null &&
-      (draft.resultShotPlayer === null || getTeamIndex(draft.resultShotPlayer) !== resultTeam)
+      (
+        normalizeOptionalDoublesPlayerIndex(draft.resultShotPlayer) === null ||
+        getTeamIndex(normalizeOptionalDoublesPlayerIndex(draft.resultShotPlayer)) !== resultTeam
+      )
     ) {
       draft.resultShotPlayer = null;
     }
@@ -3226,8 +3240,8 @@ function renderDoublesPointComposer(match, computed, draft, prefix, context = nu
                   : draft.outcome === "forced_error"
                     ? `Forcing Shot (by ${getTeamName(match, precedingTeam)})`
                     : `Preceding Shot (by ${getTeamName(match, precedingTeam)})`,
-                getDoublesTeamOptions(match, precedingTeam),
-                draft.precedingShotPlayer
+                [...getDoublesTeamOptions(match, precedingTeam), { value: "uncertain", label: "Unc" }],
+                draft.precedingShotPlayer === null ? "uncertain" : draft.precedingShotPlayer
               )
           }
           ${renderChoiceGrid("Preceding Shot Type", [
@@ -3236,8 +3250,9 @@ function renderDoublesPointComposer(match, computed, draft, prefix, context = nu
             { value: "volley", label: "V" },
             { value: "overhead", label: "OH" },
             { value: "drop_shot", label: "Drop" },
+            { value: "serve", label: "Srv" },
             { value: "uncertain", label: "Unc", muted: true },
-          ], draft.precedingShotType, `${prefix}-preceding-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ], draft.precedingShotType, `${prefix}-preceding-shot`, "grid-cols-3 sm:grid-cols-7")}
           ${
             resultTeam === null
               ? ""
@@ -3257,8 +3272,9 @@ function renderDoublesPointComposer(match, computed, draft, prefix, context = nu
             { value: "volley", label: "V" },
             { value: "overhead", label: "OH" },
             { value: "drop_shot", label: "Drop" },
+            { value: "serve", label: "Srv" },
             { value: "uncertain", label: "Unc", muted: true },
-          ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-7")}
           ${renderChoiceGrid("Rally Length", RALLY_LENGTH_OPTIONS.map((option) => ({ ...option, muted: option.value === "uncertain" })), draft.rallyLength, `${prefix}-rally`, "grid-cols-3")}
           ${renderDoublesNetPositionSection(prefix, match, resolvedNetPositions)}
           ${renderDoublesPlayerChoiceRow(
@@ -3339,16 +3355,18 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
             { value: "volley", label: "Volley" },
             { value: "overhead", label: "OH" },
             { value: "drop_shot", label: "Drop" },
+            { value: "serve", label: "Srv" },
             { value: "uncertain", label: "Uncertain", muted: true },
-          ], draft.precedingShotType, `${prefix}-preceding-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ], draft.precedingShotType, `${prefix}-preceding-shot`, "grid-cols-3 sm:grid-cols-7")}
           ${renderChoiceGrid(resultShotLabel, [
             { value: "forehand", label: "FH" },
             { value: "backhand", label: "BH" },
             { value: "volley", label: "Volley" },
             { value: "overhead", label: "OH" },
             { value: "drop_shot", label: "Drop" },
+            { value: "serve", label: "Srv" },
             { value: "uncertain", label: "Uncertain", muted: true },
-          ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-6")}
+          ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-7")}
           ${renderChoiceGrid("Rally Length", RALLY_LENGTH_OPTIONS.map((option) => ({ ...option, muted: option.value === "uncertain" })), draft.rallyLength, `${prefix}-rally`, "grid-cols-3")}
           <div class="rounded-[1.5rem] border border-white/10 bg-court-950/40 p-4">
             <p class="text-sm font-semibold text-white">Flags</p>
@@ -3874,6 +3892,12 @@ function renderLive(view) {
                   <p class="mt-2">Team B: Deuce ${escapeHtml(playerName(match, receiveFormation.teamB.deuce))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamB.ad))}</p>
                 </div>
               </div>
+              <div class="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                <p class="text-sm text-court-100">Flagged: <span class="font-semibold text-amber-200">${computed.flaggedPoints}</span></p>
+                <button data-action="open-adjust-score" class="rounded-xl border border-white/10 px-4 py-2 text-sm text-court-100 transition hover:border-court-300/40 hover:bg-white/5">
+                  Adjust Score
+                </button>
+              </div>
             </div>
           </section>
           ${
@@ -4158,15 +4182,15 @@ function renderStatsTable(match, stats) {
     ["Long Rally Win %", formatCountPercent(stats[0].longRallyPointsWon, stats[0].longRallyPointsPlayed), formatCountPercent(stats[1].longRallyPointsWon, stats[1].longRallyPointsPlayed)],
     ["Winners & Errors", "", ""],
     ["Winners", sumShots(stats[0].resultShots), sumShots(stats[1].resultShots)],
-    ["Winners FH/BH/V/OH/D", shortShotLine(stats[0].resultShots), shortShotLine(stats[1].resultShots)],
+    ["Winners FH/BH/V/OH/D/S", shortShotLine(stats[0].resultShots), shortShotLine(stats[1].resultShots)],
     ["Unforced Errors", sumShots(stats[0].unforcedErrors), sumShots(stats[1].unforcedErrors)],
-    ["UE FH/BH/V/OH/D", shortShotLine(stats[0].unforcedErrors), shortShotLine(stats[1].unforcedErrors)],
+    ["UE FH/BH/V/OH/D/S", shortShotLine(stats[0].unforcedErrors), shortShotLine(stats[1].unforcedErrors)],
     ["Forced Errors", stats[0].forcedErrors, stats[1].forcedErrors],
     ["Forcing Shots", sumShots(stats[0].forcingShots), sumShots(stats[1].forcingShots)],
-    ["Forcing Shots FH/BH/V/OH/D", shortShotLine(stats[0].forcingShots), shortShotLine(stats[1].forcingShots)],
+    ["Forcing Shots FH/BH/V/OH/D/S", shortShotLine(stats[0].forcingShots), shortShotLine(stats[1].forcingShots)],
     ["Patterns", "", ""],
-    ["Winners After Opp FH/BH/V/OH/D", shortShotLine(stats[0].winnersAfterOpponentShot), shortShotLine(stats[1].winnersAfterOpponentShot)],
-    ["Errors After Opp FH/BH/V/OH/D", shortShotLine(stats[0].errorsAfterOpponentShot), shortShotLine(stats[1].errorsAfterOpponentShot)],
+    ["Winners After Opp FH/BH/V/OH/D/S", shortShotLine(stats[0].winnersAfterOpponentShot), shortShotLine(stats[1].winnersAfterOpponentShot)],
+    ["Errors After Opp FH/BH/V/OH/D/S", shortShotLine(stats[0].errorsAfterOpponentShot), shortShotLine(stats[1].errorsAfterOpponentShot)],
     ["Net & Break", "", ""],
     ["Net Points Won / Played", formatFraction(stats[0].netPointsWon, stats[0].netPointsPlayed), formatFraction(stats[1].netPointsWon, stats[1].netPointsPlayed)],
     ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
@@ -4194,7 +4218,7 @@ function renderStatsTable(match, stats) {
 }
 
 function shortShotLine(bucket) {
-  return `${bucket.forehand}/${bucket.backhand}/${bucket.volley}/${bucket.overhead}/${bucket.drop_shot}`;
+  return `${bucket.forehand}/${bucket.backhand}/${bucket.volley}/${bucket.overhead}/${bucket.drop_shot}/${bucket.serve}`;
 }
 
 function formatCountPercent(count, total) {
