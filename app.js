@@ -26,15 +26,21 @@ const STORAGE_KEY = "tennisTracker.activeMatchId";
 const MATCH_FORMAT = "best_of_2_super_tiebreak";
 const MATCH_FORMAT_LABEL = "Best of 2 sets + match tiebreak";
 
+function createInitialSetupState() {
+  return {
+    matchType: null,
+    playerA: "",
+    playerB: "",
+    initialServer: 0,
+    scoringFormat: "ad",
+  };
+}
+
 const state = {
   matches: [],
   currentMatchId: localStorage.getItem(STORAGE_KEY) || "",
   currentTab: "live",
-  setup: {
-    playerA: "",
-    playerB: "",
-    initialServer: 0,
-  },
+  setup: createInitialSetupState(),
   draft: createEmptyDraft(),
   history: {
     setIndex: 0,
@@ -152,7 +158,7 @@ function createStatsBucket() {
   };
 }
 
-function createMatchRecord({ playerA, playerB, initialServer }) {
+function createMatchRecord({ playerA, playerB, initialServer, matchType, scoringFormat = "ad" }) {
   const timestamp = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -161,6 +167,8 @@ function createMatchRecord({ playerA, playerB, initialServer }) {
     date: timestamp,
     status: "in_progress",
     format: MATCH_FORMAT,
+    matchType: matchType === "doubles" ? "doubles" : "singles",
+    scoringFormat: scoringFormat === "no_ad" ? "no_ad" : "ad",
     playerA: playerA.trim(),
     playerB: playerB.trim(),
     initialServer,
@@ -258,15 +266,24 @@ function isBreakPoint(gamePoints, server) {
   return false;
 }
 
-function isGameWon(pointsA, pointsB) {
+function isGameWon(pointsA, pointsB, scoringFormat = "ad") {
+  if (scoringFormat === "no_ad") {
+    if (pointsA >= 3 && pointsB >= 3) {
+      return pointsA !== pointsB;
+    }
+    return pointsA >= 4 || pointsB >= 4;
+  }
   return (pointsA >= 4 || pointsB >= 4) && Math.abs(pointsA - pointsB) >= 2;
 }
 
-function getGameScoreLabel(pointsA, pointsB) {
+function getGameScoreLabel(pointsA, pointsB, scoringFormat = "ad") {
   const labels = ["0", "15", "30", "40"];
   if (pointsA >= 3 && pointsB >= 3) {
     if (pointsA === pointsB) {
-      return ["Deuce", "Deuce"];
+      return scoringFormat === "no_ad" ? ["Deciding Pt", "Deciding Pt"] : ["Deuce", "Deuce"];
+    }
+    if (scoringFormat === "no_ad") {
+      return [labels[Math.min(pointsA, 3)] || "40", labels[Math.min(pointsB, 3)] || "40"];
     }
     return pointsA > pointsB ? ["Ad", "40"] : ["40", "Ad"];
   }
@@ -346,6 +363,14 @@ function normalizeExcludeFromStats(value) {
 
 function normalizeRequiredServeResult(value) {
   return SERVE_OPTIONS.some((option) => option.value === value) ? value : "";
+}
+
+function normalizeMatchType(value) {
+  return value === "doubles" ? "doubles" : "singles";
+}
+
+function normalizeScoringFormat(value) {
+  return value === "no_ad" ? "no_ad" : "ad";
 }
 
 function triStatesToPlayerIndexes(triStates) {
@@ -492,6 +517,7 @@ function normalizeStoredPoint(rawPoint) {
 }
 
 function computeMatch(match) {
+  const scoringFormat = normalizeScoringFormat(match.scoringFormat);
   const sets = [];
   const statsOverall = [createStatsBucket(), createStatsBucket()];
   const statsBySet = [];
@@ -655,7 +681,7 @@ function computeMatch(match) {
     const isBreakChance = !currentGame.isTiebreak && isBreakPoint(currentGame.pointsWon, server);
     const scoreBeforeGamePoint = currentGame.isTiebreak
       ? [...currentGame.pointsWon]
-      : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1]);
+      : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat);
     const netApproachStates = resolveLegacyTriStates(rawEntry, "net", winner, loser, server, receiver);
     const returnWinnerStates = resolveLegacyTriStates(rawEntry, "return", winner, loser, server, receiver);
     const { outcome, resultShotType, precedingShotType, rallyLength } = normalizedPoint;
@@ -759,10 +785,10 @@ function computeMatch(match) {
       ? currentGame.isSuperTiebreak
         ? isSuperTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
         : isTiebreakWon(currentGame.pointsWon[0], currentGame.pointsWon[1])
-      : isGameWon(currentGame.pointsWon[0], currentGame.pointsWon[1]);
+      : isGameWon(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat);
     const scoreAfterGamePoint = currentGame.isTiebreak
       ? [...currentGame.pointsWon]
-      : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1]);
+      : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat);
 
     if (isBreakChance && !excludeFromStats) {
       [statsOverall, setBuckets].forEach((bucketGroup) => {
@@ -844,7 +870,7 @@ function computeMatch(match) {
     liveScoreDisplay: currentGame
       ? currentGame.isTiebreak
         ? currentGame.pointsWon.map(String)
-        : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1])
+        : getGameScoreLabel(currentGame.pointsWon[0], currentGame.pointsWon[1], scoringFormat)
       : currentSet.gamesWon[0] === 6 && currentSet.gamesWon[1] === 6
         ? ["0", "0"]
         : ["0", "0"],
@@ -954,6 +980,8 @@ function encodeDataForExport(match) {
       date: match.date,
       initialServer: playerName(match, match.initialServer),
       format: match.format,
+      matchType: normalizeMatchType(match.matchType),
+      scoringFormat: normalizeScoringFormat(match.scoringFormat),
     },
     entries: (Array.isArray(match.points) ? match.points : []).map((entry) => (
       isCheckpointEntry(entry)
@@ -1169,7 +1197,7 @@ function validateImportedPoint(point) {
   };
 }
 
-function createImportedMatch({ playerA, playerB, initialServer, points }) {
+function createImportedMatch({ playerA, playerB, initialServer, points, matchType = "singles", scoringFormat = "ad" }) {
   const timestamp = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -1179,6 +1207,8 @@ function createImportedMatch({ playerA, playerB, initialServer, points }) {
     date: timestamp,
     status: "in_progress",
     format: MATCH_FORMAT,
+    matchType: normalizeMatchType(matchType),
+    scoringFormat: normalizeScoringFormat(scoringFormat),
     playerA: playerA.trim(),
     playerB: playerB.trim(),
     initialServer,
@@ -1196,6 +1226,8 @@ function validateImportedMatchShape(match) {
   if (typeof match.playerA !== "string" || !match.playerA.trim() || typeof match.playerB !== "string" || !match.playerB.trim()) {
     throw new Error("Imported match must include both player names.");
   }
+  normalizeMatchType(match.matchType);
+  normalizeScoringFormat(match.scoringFormat);
   if (!Array.isArray(match.points)) {
     throw new Error("Imported match is missing a points array.");
   }
@@ -1347,6 +1379,8 @@ function importMatchFromJson(text) {
     playerA,
     playerB,
     initialServer: playerLookup.get(initialServerName),
+    matchType: payload.match.matchType,
+    scoringFormat: payload.match.scoringFormat,
     points,
   });
   validateImportedMatchShape(importedMatch);
@@ -1482,6 +1516,8 @@ function importMatchFromCsv(text) {
     playerA,
     playerB,
     initialServer: playerLookup.get(firstRecord.server.trim()),
+    matchType: "singles",
+    scoringFormat: "ad",
     points,
   });
   validateImportedMatchShape(importedMatch);
@@ -1735,12 +1771,15 @@ async function createMatchFromSetup() {
     playerA,
     playerB,
     initialServer: Number(state.setup.initialServer),
+    matchType: state.setup.matchType,
+    scoringFormat: state.setup.scoringFormat,
   });
   await saveMatch(match);
   state.currentMatchId = match.id;
   localStorage.setItem(STORAGE_KEY, match.id);
   state.currentTab = "live";
   resetDrafts();
+  state.setup = createInitialSetupState();
   state.error = "";
   render();
 }
@@ -2193,6 +2232,8 @@ function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
 
 function renderSetup() {
   const recent = state.matches.slice(0, 4);
+  const showSinglesSetup = state.setup.matchType === "singles";
+  const showDoublesPlaceholder = state.setup.matchType === "doubles";
   return `
     <main class="px-4 py-6 sm:px-6">
       <input id="match-import-input" type="file" accept=".json,.csv,application/json,text/csv" class="hidden" />
@@ -2200,31 +2241,61 @@ function renderSetup() {
         <p class="text-xs uppercase tracking-[0.35em] text-court-300/70">Tennis Tracker</p>
         <h1 class="mt-3 text-3xl font-bold text-white">Start a match and log every point courtside.</h1>
         <p class="mt-3 max-w-2xl text-sm text-court-200/70">Offline-first scoring, full point history, per-set stats, and one-tap exports.</p>
-        <div class="mt-6 grid gap-4 sm:grid-cols-2">
-          <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player One</span>
-            <input data-action="setup-input" data-key="playerA" value="${escapeHtml(state.setup.playerA)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player A" />
-          </label>
-          <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player Two</span>
-            <input data-action="setup-input" data-key="playerB" value="${escapeHtml(state.setup.playerB)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player B" />
-          </label>
+        <div class="mt-6 grid gap-3 sm:grid-cols-2">
+          <button data-action="setup-match-type" data-value="singles" class="rounded-[1.75rem] border px-5 py-6 text-left transition ${showSinglesSetup ? "border-court-300 bg-court-300/10" : "border-white/10 bg-white/5 hover:border-court-300/50"}">
+            <span class="block text-xs uppercase tracking-[0.3em] ${showSinglesSetup ? "text-court-300" : "text-court-300/70"}">Match Type</span>
+            <span class="mt-3 block text-xl font-semibold text-white">Singles Match</span>
+          </button>
+          <button data-action="setup-match-type" data-value="doubles" class="rounded-[1.75rem] border px-5 py-6 text-left transition ${showDoublesPlaceholder ? "border-court-300 bg-court-300/10" : "border-white/10 bg-white/5 hover:border-court-300/50"}">
+            <span class="block text-xs uppercase tracking-[0.3em] ${showDoublesPlaceholder ? "text-court-300" : "text-court-300/70"}">Match Type</span>
+            <span class="mt-3 block text-xl font-semibold text-white">Doubles Match</span>
+          </button>
         </div>
-        <div class="mt-5">
-          ${renderChoiceGrid(
-            "First Server",
-            [
-              { value: "0", label: state.setup.playerA || "Player A" },
-              { value: "1", label: state.setup.playerB || "Player B" },
-            ],
-            String(state.setup.initialServer),
-            "setup-server",
-            "grid-cols-2"
-          )}
-        </div>
-        <button data-action="start-match" class="mt-6 w-full rounded-2xl bg-court-300 px-5 py-5 text-base font-semibold text-court-950 transition hover:bg-court-200">
-          Start Match
-        </button>
+        ${
+          showSinglesSetup
+            ? `
+              <div class="mt-6 grid gap-4 sm:grid-cols-2">
+                <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player One</span>
+                  <input data-action="setup-input" data-key="playerA" value="${escapeHtml(state.setup.playerA)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player A" />
+                </label>
+                <label class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player Two</span>
+                  <input data-action="setup-input" data-key="playerB" value="${escapeHtml(state.setup.playerB)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player B" />
+                </label>
+              </div>
+              <div class="mt-5">
+                ${renderChoiceGrid(
+                  "Scoring Format",
+                  [
+                    { value: "ad", label: "Ad Scoring" },
+                    { value: "no_ad", label: "No-Ad Scoring" },
+                  ],
+                  state.setup.scoringFormat,
+                  "setup-scoring-format",
+                  "grid-cols-2"
+                )}
+              </div>
+              <div class="mt-5">
+                ${renderChoiceGrid(
+                  "First Server",
+                  [
+                    { value: "0", label: state.setup.playerA || "Player A" },
+                    { value: "1", label: state.setup.playerB || "Player B" },
+                  ],
+                  String(state.setup.initialServer),
+                  "setup-server",
+                  "grid-cols-2"
+                )}
+              </div>
+              <button data-action="start-match" class="mt-6 w-full rounded-2xl bg-court-300 px-5 py-5 text-base font-semibold text-court-950 transition hover:bg-court-200">
+                Start Match
+              </button>
+            `
+            : showDoublesPlaceholder
+              ? `<div class="mt-6 rounded-2xl border border-dashed border-white/10 bg-white/5 px-5 py-6 text-sm text-court-200/70">Doubles setup coming soon</div>`
+              : ""
+        }
         <button data-action="import-match" class="mt-3 w-full rounded-2xl border border-court-300/35 bg-transparent px-5 py-5 text-base font-medium text-court-200 transition hover:border-court-300/60 hover:bg-white/5">
           Import Match
         </button>
@@ -2826,6 +2897,16 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (action === "setup-match-type") {
+    state.setup.matchType = target.dataset.value === "doubles" ? "doubles" : "singles";
+    render();
+    return;
+  }
+  if (action === "setup-scoring-format") {
+    state.setup.scoringFormat = normalizeScoringFormat(target.dataset.value);
+    render();
+    return;
+  }
   if (action === "draft-save") {
     await addPoint();
     return;
@@ -2938,6 +3019,7 @@ document.addEventListener("click", async (event) => {
   if (action === "new-match") {
     state.currentMatchId = "";
     state.currentTab = "live";
+    state.setup = createInitialSetupState();
     resetDrafts();
     render();
     return;
