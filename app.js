@@ -26,6 +26,19 @@ const STORAGE_KEY = "tennisTracker.activeMatchId";
 const MATCH_FORMAT = "best_of_2_super_tiebreak";
 const MATCH_FORMAT_LABEL = "Best of 2 sets + match tiebreak";
 
+function createInitialDoublesSetup() {
+  return {
+    teamA: { player1: "", player2: "" },
+    teamB: { player1: "", player2: "" },
+    scoringFormat: "ad",
+    serveOrder: [null, null, null, null],
+    receiveFormation: {
+      teamA: { deuce: 0, ad: 1 },
+      teamB: { deuce: 2, ad: 3 },
+    },
+  };
+}
+
 function createInitialSetupState() {
   return {
     matchType: null,
@@ -33,6 +46,7 @@ function createInitialSetupState() {
     playerB: "",
     initialServer: 0,
     scoringFormat: "ad",
+    doublesSetup: createInitialDoublesSetup(),
   };
 }
 
@@ -158,8 +172,40 @@ function createStatsBucket() {
   };
 }
 
-function createMatchRecord({ playerA, playerB, initialServer, matchType, scoringFormat = "ad" }) {
+function createMatchRecord({
+  playerA,
+  playerB,
+  initialServer,
+  matchType,
+  scoringFormat = "ad",
+  teamA,
+  teamB,
+  setConfigs,
+}) {
   const timestamp = new Date().toISOString();
+  const normalizedMatchType = matchType === "doubles" ? "doubles" : "singles";
+  if (normalizedMatchType === "doubles") {
+    return {
+      id: crypto.randomUUID(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      date: timestamp,
+      status: "in_progress",
+      format: MATCH_FORMAT,
+      matchType: "doubles",
+      scoringFormat: scoringFormat === "no_ad" ? "no_ad" : "ad",
+      teamA: {
+        player1: String(teamA?.player1 || "").trim(),
+        player2: String(teamA?.player2 || "").trim(),
+      },
+      teamB: {
+        player1: String(teamB?.player1 || "").trim(),
+        player2: String(teamB?.player2 || "").trim(),
+      },
+      setConfigs: Array.isArray(setConfigs) ? setConfigs : [],
+      points: [],
+    };
+  }
   return {
     id: crypto.randomUUID(),
     createdAt: timestamp,
@@ -167,7 +213,7 @@ function createMatchRecord({ playerA, playerB, initialServer, matchType, scoring
     date: timestamp,
     status: "in_progress",
     format: MATCH_FORMAT,
-    matchType: matchType === "doubles" ? "doubles" : "singles",
+    matchType: normalizedMatchType,
     scoringFormat: scoringFormat === "no_ad" ? "no_ad" : "ad",
     playerA: playerA.trim(),
     playerB: playerB.trim(),
@@ -197,7 +243,64 @@ function clearNotice() {
   }
 }
 
+function getDoublesPlayerName(match, playerIndex) {
+  if (playerIndex === 0) {
+    return match.teamA.player1;
+  }
+  if (playerIndex === 1) {
+    return match.teamA.player2;
+  }
+  if (playerIndex === 2) {
+    return match.teamB.player1;
+  }
+  if (playerIndex === 3) {
+    return match.teamB.player2;
+  }
+  return "";
+}
+
+function getTeamIndex(playerIndex) {
+  return playerIndex < 2 ? 0 : 1;
+}
+
+function getPartnerIndex(playerIndex) {
+  if (playerIndex === 0) {
+    return 1;
+  }
+  if (playerIndex === 1) {
+    return 0;
+  }
+  if (playerIndex === 2) {
+    return 3;
+  }
+  if (playerIndex === 3) {
+    return 2;
+  }
+  return null;
+}
+
+function getTeamName(match, teamIndex) {
+  if (teamIndex === 0) {
+    return `${match.teamA.player1} & ${match.teamA.player2}`;
+  }
+  return `${match.teamB.player1} & ${match.teamB.player2}`;
+}
+
+function sideName(match, index) {
+  if (match.matchType === "doubles") {
+    return getTeamName(match, index);
+  }
+  return index === 0 ? match.playerA : match.playerB;
+}
+
+function matchTitle(match) {
+  return `${sideName(match, 0)} vs ${sideName(match, 1)}`;
+}
+
 function playerName(match, index) {
+  if (match.matchType === "doubles") {
+    return getDoublesPlayerName(match, index);
+  }
   return index === 0 ? match.playerA : match.playerB;
 }
 
@@ -517,6 +620,29 @@ function normalizeStoredPoint(rawPoint) {
 }
 
 function computeMatch(match) {
+  if (normalizeMatchType(match.matchType) === "doubles") {
+    const liveServer = Number(match.setConfigs?.[0]?.serveOrder?.[0]);
+    return {
+      sets: [],
+      setsWon: [0, 0],
+      statsOverall: [createStatsBucket(), createStatsBucket()],
+      statsBySet: [],
+      matchWinner: null,
+      isComplete: false,
+      liveSetIndex: 0,
+      liveServer: Number.isInteger(liveServer) ? liveServer : 0,
+      liveSetGames: [0, 0],
+      liveSetDisplay: [0, 0],
+      liveSetIsMatchTiebreak: false,
+      liveGamePoints: [0, 0],
+      liveGameIsTiebreak: false,
+      liveGameType: "standard",
+      liveScoreDisplay: ["0", "0"],
+      totalPoints: 0,
+      flaggedPoints: 0,
+      historyEntries: [],
+    };
+  }
   const scoringFormat = normalizeScoringFormat(match.scoringFormat);
   const sets = [];
   const statsOverall = [createStatsBucket(), createStatsBucket()];
@@ -971,17 +1097,23 @@ async function bootstrap() {
 
 function encodeDataForExport(match) {
   const computed = computeMatch(match);
+  const exportInitialServer = match.matchType === "doubles"
+    ? playerName(match, match.setConfigs?.[0]?.serveOrder?.[0] ?? 0)
+    : playerName(match, match.initialServer);
   return {
     match: {
       id: match.id,
-      playerA: match.playerA,
-      playerB: match.playerB,
+      playerA: sideName(match, 0),
+      playerB: sideName(match, 1),
+      teamA: match.teamA,
+      teamB: match.teamB,
       status: match.status,
       date: match.date,
-      initialServer: playerName(match, match.initialServer),
+      initialServer: exportInitialServer,
       format: match.format,
       matchType: normalizeMatchType(match.matchType),
       scoringFormat: normalizeScoringFormat(match.scoringFormat),
+      setConfigs: match.setConfigs,
     },
     entries: (Array.isArray(match.points) ? match.points : []).map((entry) => (
       isCheckpointEntry(entry)
@@ -1012,12 +1144,12 @@ function encodeDataForExport(match) {
     summary: {
       setsWon: computed.setsWon,
       totalPoints: computed.totalPoints,
-      winner: computed.matchWinner === null ? null : playerName(match, computed.matchWinner),
+      winner: computed.matchWinner === null ? null : sideName(match, computed.matchWinner),
     },
     sets: computed.sets.map((set) => ({
       index: set.index + 1,
       score: set.score,
-      winner: set.winner === null ? null : playerName(match, set.winner),
+      winner: set.winner === null ? null : sideName(match, set.winner),
       tiebreakScore: set.tiebreakScore,
       isMatchTiebreak: set.isMatchTiebreak,
       games: set.games.map((game) => ({
@@ -1027,12 +1159,12 @@ function encodeDataForExport(match) {
         isSuperTiebreak: Boolean(game.isSuperTiebreak),
         scoreBefore: game.scoreBefore,
         scoreAfter: game.scoreAfter,
-        winner: playerName(match, game.winner),
+        winner: sideName(match, game.winner),
         points: game.points.map((point) => ({
           pointNumber: point.pointNumber,
           server: playerName(match, point.server),
           receiver: playerName(match, point.receiver),
-          winner: playerName(match, point.winner),
+          winner: sideName(match, point.winner),
           scoreBefore: point.scoreBefore,
           scoreAfter: point.scoreAfter,
           serveResult: point.serveResult,
@@ -1197,8 +1329,42 @@ function validateImportedPoint(point) {
   };
 }
 
-function createImportedMatch({ playerA, playerB, initialServer, points, matchType = "singles", scoringFormat = "ad" }) {
+function createImportedMatch({
+  playerA,
+  playerB,
+  initialServer,
+  points,
+  matchType = "singles",
+  scoringFormat = "ad",
+  teamA,
+  teamB,
+  setConfigs,
+}) {
   const timestamp = new Date().toISOString();
+  const normalizedMatchType = normalizeMatchType(matchType);
+  if (normalizedMatchType === "doubles") {
+    return {
+      id: crypto.randomUUID(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      importedAt: timestamp,
+      date: timestamp,
+      status: "in_progress",
+      format: MATCH_FORMAT,
+      matchType: "doubles",
+      scoringFormat: normalizeScoringFormat(scoringFormat),
+      teamA: {
+        player1: String(teamA?.player1 || "").trim(),
+        player2: String(teamA?.player2 || "").trim(),
+      },
+      teamB: {
+        player1: String(teamB?.player1 || "").trim(),
+        player2: String(teamB?.player2 || "").trim(),
+      },
+      setConfigs: Array.isArray(setConfigs) ? setConfigs : [],
+      points,
+    };
+  }
   return {
     id: crypto.randomUUID(),
     createdAt: timestamp,
@@ -1207,7 +1373,7 @@ function createImportedMatch({ playerA, playerB, initialServer, points, matchTyp
     date: timestamp,
     status: "in_progress",
     format: MATCH_FORMAT,
-    matchType: normalizeMatchType(matchType),
+    matchType: normalizedMatchType,
     scoringFormat: normalizeScoringFormat(scoringFormat),
     playerA: playerA.trim(),
     playerB: playerB.trim(),
@@ -1223,10 +1389,22 @@ function validateImportedMatchShape(match) {
   if (typeof match.id !== "string" || !match.id) {
     throw new Error("Imported match is missing an id.");
   }
-  if (typeof match.playerA !== "string" || !match.playerA.trim() || typeof match.playerB !== "string" || !match.playerB.trim()) {
+  const matchType = normalizeMatchType(match.matchType);
+  if (matchType === "doubles") {
+    if (
+      typeof match.teamA?.player1 !== "string" || !match.teamA.player1.trim() ||
+      typeof match.teamA?.player2 !== "string" || !match.teamA.player2.trim() ||
+      typeof match.teamB?.player1 !== "string" || !match.teamB.player1.trim() ||
+      typeof match.teamB?.player2 !== "string" || !match.teamB.player2.trim()
+    ) {
+      throw new Error("Imported doubles match must include all 4 player names.");
+    }
+    if (!Array.isArray(match.setConfigs)) {
+      throw new Error("Imported doubles match is missing set configuration.");
+    }
+  } else if (typeof match.playerA !== "string" || !match.playerA.trim() || typeof match.playerB !== "string" || !match.playerB.trim()) {
     throw new Error("Imported match must include both player names.");
   }
-  normalizeMatchType(match.matchType);
   normalizeScoringFormat(match.scoringFormat);
   if (!Array.isArray(match.points)) {
     throw new Error("Imported match is missing a points array.");
@@ -1311,6 +1489,19 @@ function importMatchFromJson(text) {
   }
   if (typeof payload.match.id !== "string" || !payload.match.id) {
     throw new Error("JSON export is missing the original match id.");
+  }
+
+  if (normalizeMatchType(payload.match.matchType) === "doubles") {
+    const importedMatch = createImportedMatch({
+      matchType: "doubles",
+      scoringFormat: payload.match.scoringFormat,
+      teamA: payload.match.teamA,
+      teamB: payload.match.teamB,
+      setConfigs: payload.match.setConfigs,
+      points: [],
+    });
+    validateImportedMatchShape(importedMatch);
+    return importedMatch;
   }
 
   const playerA = String(payload.match.playerA || "").trim();
@@ -1569,7 +1760,8 @@ async function exportMatch(kind) {
   if (!view) {
     return;
   }
-  const slug = `${view.match.playerA}-vs-${view.match.playerB}`.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const title = matchTitle(view.match);
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   if (kind === "json") {
     downloadFile(`${slug || "match"}.json`, JSON.stringify(encodeDataForExport(view.match), null, 2), "application/json");
     state.exportMessage = "JSON exported.";
@@ -1580,8 +1772,8 @@ async function exportMatch(kind) {
   }
   if (kind === "share") {
     const payload = {
-      title: `${view.match.playerA} vs ${view.match.playerB}`,
-      text: `${view.match.playerA} vs ${view.match.playerB} tennis match export`,
+      title,
+      text: `${title} tennis match export`,
       files: [
         new File([JSON.stringify(encodeDataForExport(view.match), null, 2)], `${slug || "match"}.json`, {
           type: "application/json",
@@ -1760,6 +1952,51 @@ async function applyCheckpointDraft() {
 }
 
 async function createMatchFromSetup() {
+  if (state.setup.matchType === "doubles") {
+    const doublesSetup = state.setup.doublesSetup;
+    const teamA = {
+      player1: doublesSetup.teamA.player1.trim(),
+      player2: doublesSetup.teamA.player2.trim(),
+    };
+    const teamB = {
+      player1: doublesSetup.teamB.player1.trim(),
+      player2: doublesSetup.teamB.player2.trim(),
+    };
+    if (!teamA.player1 || !teamA.player2 || !teamB.player1 || !teamB.player2) {
+      state.error = "Enter all 4 player names.";
+      render();
+      return;
+    }
+    if (!doublesSetup.serveOrder.every((playerIndex) => Number.isInteger(playerIndex))) {
+      state.error = "Complete the Set 1 serve order.";
+      render();
+      return;
+    }
+    const match = createMatchRecord({
+      matchType: "doubles",
+      scoringFormat: doublesSetup.scoringFormat,
+      teamA,
+      teamB,
+      setConfigs: [
+        {
+          serveOrder: [...doublesSetup.serveOrder],
+          receiveFormation: {
+            teamA: { ...doublesSetup.receiveFormation.teamA },
+            teamB: { ...doublesSetup.receiveFormation.teamB },
+          },
+        },
+      ],
+    });
+    await saveMatch(match);
+    state.currentMatchId = match.id;
+    localStorage.setItem(STORAGE_KEY, match.id);
+    state.currentTab = "live";
+    resetDrafts();
+    state.setup = createInitialSetupState();
+    state.error = "";
+    render();
+    return;
+  }
   const playerA = state.setup.playerA.trim();
   const playerB = state.setup.playerB.trim();
   if (!playerA || !playerB) {
@@ -2158,6 +2395,179 @@ function renderChoiceGrid(label, options, selected, action, gridClass, allowUnse
   `;
 }
 
+function doublesPlayerLabel(setup, playerIndex) {
+  const name = playerIndex === 0
+    ? setup.teamA.player1
+    : playerIndex === 1
+      ? setup.teamA.player2
+      : playerIndex === 2
+        ? setup.teamB.player1
+        : setup.teamB.player2;
+  return name.trim() || `Player ${playerIndex + 1}`;
+}
+
+function renderDoublesFormationOptions(teamKey, label, players, formation) {
+  const firstOption = {
+    deuce: players[0].index,
+    ad: players[1].index,
+    label: `${players[0].name} Deuce / ${players[1].name} Ad`,
+  };
+  const secondOption = {
+    deuce: players[1].index,
+    ad: players[0].index,
+    label: `${players[1].name} Deuce / ${players[0].name} Ad`,
+  };
+  const selected = formation.deuce === firstOption.deuce && formation.ad === firstOption.ad ? "first" : "second";
+  return `
+    <div class="rounded-[1.5rem] border border-white/10 bg-white/5 p-4">
+      <p class="text-sm font-semibold text-white">${label}</p>
+      <p class="mt-2 text-sm text-court-200/65">When receiving, who covers deuce court (right side)?</p>
+      <div class="mt-4 grid gap-3 sm:grid-cols-2">
+        ${[
+          { value: "first", label: firstOption.label },
+          { value: "second", label: secondOption.label },
+        ].map((option) => `
+          <button
+            data-action="setup-doubles-formation"
+            data-team="${teamKey}"
+            data-value="${option.value}"
+            class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+              selected === option.value
+                ? "border-court-300 bg-court-300 text-court-950"
+                : "border-white/10 bg-court-950/30 text-court-100"
+            }"
+          >
+            ${escapeHtml(option.label)}
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderDoublesSetup() {
+  const doublesSetup = state.setup.doublesSetup;
+  const firstServer = doublesSetup.serveOrder[0];
+  const secondServer = doublesSetup.serveOrder[1];
+  const teamAPlayers = [
+    { index: 0, name: doublesPlayerLabel(doublesSetup, 0) },
+    { index: 1, name: doublesPlayerLabel(doublesSetup, 1) },
+  ];
+  const teamBPlayers = [
+    { index: 2, name: doublesPlayerLabel(doublesSetup, 2) },
+    { index: 3, name: doublesPlayerLabel(doublesSetup, 3) },
+  ];
+  const firstServerOptions = [...teamAPlayers, ...teamBPlayers];
+  const secondServerOptions = firstServer === null
+    ? []
+    : firstServerOptions.filter((player) => getTeamIndex(player.index) !== getTeamIndex(firstServer));
+  const serveOrderComplete = doublesSetup.serveOrder.every((playerIndex) => Number.isInteger(playerIndex));
+
+  return `
+    <div class="mt-6 space-y-5">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <div class="space-y-4">
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Team A</p>
+          <label class="block rounded-2xl border border-white/10 bg-white/5 p-4">
+            <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player 1</span>
+            <input data-action="setup-doubles-input" data-team="teamA" data-player="player1" value="${escapeHtml(doublesSetup.teamA.player1)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player 1" />
+          </label>
+          <label class="block rounded-2xl border border-white/10 bg-white/5 p-4">
+            <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player 2</span>
+            <input data-action="setup-doubles-input" data-team="teamA" data-player="player2" value="${escapeHtml(doublesSetup.teamA.player2)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player 2" />
+          </label>
+        </div>
+        <div class="space-y-4">
+          <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Team B</p>
+          <label class="block rounded-2xl border border-white/10 bg-white/5 p-4">
+            <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player 3</span>
+            <input data-action="setup-doubles-input" data-team="teamB" data-player="player1" value="${escapeHtml(doublesSetup.teamB.player1)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player 3" />
+          </label>
+          <label class="block rounded-2xl border border-white/10 bg-white/5 p-4">
+            <span class="text-xs uppercase tracking-[0.3em] text-court-300/70">Player 4</span>
+            <input data-action="setup-doubles-input" data-team="teamB" data-player="player2" value="${escapeHtml(doublesSetup.teamB.player2)}" class="mt-3 w-full bg-transparent text-lg text-white outline-none placeholder:text-court-200/35" placeholder="Player 4" />
+          </label>
+        </div>
+      </div>
+      ${renderChoiceGrid(
+        "Scoring Format",
+        [
+          { value: "ad", label: "Ad Scoring" },
+          { value: "no_ad", label: "No-Ad Scoring" },
+        ],
+        doublesSetup.scoringFormat,
+        "setup-doubles-scoring-format",
+        "grid-cols-2"
+      )}
+      <div class="rounded-[1.75rem] border border-white/10 bg-white/5 p-4">
+        <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Set 1 Serve Order</p>
+        <div class="mt-4 space-y-4">
+          <div>
+            <p class="mb-3 text-sm font-semibold text-white">1st Server</p>
+            <div class="grid gap-3 sm:grid-cols-2">
+              ${firstServerOptions.map((player) => `
+                <button
+                  data-action="setup-doubles-first-server"
+                  data-value="${player.index}"
+                  class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+                    firstServer === player.index
+                      ? "border-court-300 bg-court-300 text-court-950"
+                      : "border-white/10 bg-court-950/30 text-court-100"
+                  }"
+                >
+                  ${escapeHtml(player.name)}
+                </button>
+              `).join("")}
+            </div>
+          </div>
+          ${
+            firstServer !== null
+              ? `
+                <div>
+                  <p class="mb-3 text-sm font-semibold text-white">2nd Server</p>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    ${secondServerOptions.map((player) => `
+                      <button
+                        data-action="setup-doubles-second-server"
+                        data-value="${player.index}"
+                        class="rounded-2xl border px-4 py-4 text-sm font-medium ${
+                          secondServer === player.index
+                            ? "border-court-300 bg-court-300 text-court-950"
+                            : "border-white/10 bg-court-950/30 text-court-100"
+                        }"
+                      >
+                        ${escapeHtml(player.name)}
+                      </button>
+                    `).join("")}
+                  </div>
+                </div>
+              `
+              : ""
+          }
+          ${
+            serveOrderComplete
+              ? `<div class="rounded-2xl border border-court-300/25 bg-court-300/10 px-4 py-4 text-sm text-court-100">
+                  1st: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[0]))}</span>
+                  &rarr; 2nd: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[1]))}</span>
+                  &rarr; 3rd: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[2]))}</span>
+                  &rarr; 4th: <span class="font-semibold text-white">${escapeHtml(doublesPlayerLabel(doublesSetup, doublesSetup.serveOrder[3]))}</span>
+                </div>`
+              : `<p class="text-sm text-court-200/65">${firstServer === null ? "Pick any player to serve first." : "Pick the second server from the other team."}</p>`
+          }
+        </div>
+      </div>
+      <div class="space-y-4">
+        <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Set 1 Receive Formation</p>
+        ${renderDoublesFormationOptions("teamA", "Team A", teamAPlayers, doublesSetup.receiveFormation.teamA)}
+        ${renderDoublesFormationOptions("teamB", "Team B", teamBPlayers, doublesSetup.receiveFormation.teamB)}
+      </div>
+      <button data-action="start-match" class="w-full rounded-2xl bg-court-300 px-5 py-5 text-base font-semibold text-court-950 transition hover:bg-court-200">
+        Start Match
+      </button>
+    </div>
+  `;
+}
+
 function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
   const states = sanitizeTriStates(flagStates);
   const positions = {
@@ -2233,7 +2643,7 @@ function renderPlayerToggleSection(prefix, key, label, match, flagStates) {
 function renderSetup() {
   const recent = state.matches.slice(0, 4);
   const showSinglesSetup = state.setup.matchType === "singles";
-  const showDoublesPlaceholder = state.setup.matchType === "doubles";
+  const showDoublesSetup = state.setup.matchType === "doubles";
   return `
     <main class="px-4 py-6 sm:px-6">
       <input id="match-import-input" type="file" accept=".json,.csv,application/json,text/csv" class="hidden" />
@@ -2246,8 +2656,8 @@ function renderSetup() {
             <span class="block text-xs uppercase tracking-[0.3em] ${showSinglesSetup ? "text-court-300" : "text-court-300/70"}">Match Type</span>
             <span class="mt-3 block text-xl font-semibold text-white">Singles Match</span>
           </button>
-          <button data-action="setup-match-type" data-value="doubles" class="rounded-[1.75rem] border px-5 py-6 text-left transition ${showDoublesPlaceholder ? "border-court-300 bg-court-300/10" : "border-white/10 bg-white/5 hover:border-court-300/50"}">
-            <span class="block text-xs uppercase tracking-[0.3em] ${showDoublesPlaceholder ? "text-court-300" : "text-court-300/70"}">Match Type</span>
+          <button data-action="setup-match-type" data-value="doubles" class="rounded-[1.75rem] border px-5 py-6 text-left transition ${showDoublesSetup ? "border-court-300 bg-court-300/10" : "border-white/10 bg-white/5 hover:border-court-300/50"}">
+            <span class="block text-xs uppercase tracking-[0.3em] ${showDoublesSetup ? "text-court-300" : "text-court-300/70"}">Match Type</span>
             <span class="mt-3 block text-xl font-semibold text-white">Doubles Match</span>
           </button>
         </div>
@@ -2292,8 +2702,8 @@ function renderSetup() {
                 Start Match
               </button>
             `
-            : showDoublesPlaceholder
-              ? `<div class="mt-6 rounded-2xl border border-dashed border-white/10 bg-white/5 px-5 py-6 text-sm text-court-200/70">Doubles setup coming soon</div>`
+            : showDoublesSetup
+              ? renderDoublesSetup()
               : ""
         }
         <button data-action="import-match" class="mt-3 w-full rounded-2xl border border-court-300/35 bg-transparent px-5 py-5 text-base font-medium text-court-200 transition hover:border-court-300/60 hover:bg-white/5">
@@ -2316,7 +2726,7 @@ function renderSetup() {
                     (match) => `
                     <button data-action="select-match" data-id="${match.id}" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left">
                       <div>
-                        <p class="font-semibold text-white">${escapeHtml(match.playerA)} vs ${escapeHtml(match.playerB)}</p>
+                        <p class="font-semibold text-white">${escapeHtml(matchTitle(match))}</p>
                         <p class="mt-1 text-sm text-court-200/60">${formatDate(match.updatedAt)}</p>
                       </div>
                       <span class="rounded-full px-3 py-1 text-xs uppercase tracking-[0.2em] ${match.status === "complete" ? "bg-court-300/15 text-court-300" : "bg-clay-500/15 text-clay-400"}">${match.status.replace("_", " ")}</span>
@@ -2334,6 +2744,56 @@ function renderSetup() {
 
 function renderLive(view) {
   const { match, computed } = view;
+  if (match.matchType === "doubles") {
+    const setConfig = match.setConfigs?.[0] || {};
+    const serveOrder = Array.isArray(setConfig.serveOrder) ? setConfig.serveOrder : [];
+    const receiveFormation = setConfig.receiveFormation || {};
+    return `
+      <section class="space-y-4">
+        <section class="rounded-[2rem] border border-white/10 bg-court-900/85 p-5 shadow-panel backdrop-blur md:p-4">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
+              <h2 class="mt-2 text-2xl font-bold text-white md:text-xl">${escapeHtml(matchTitle(match))}</h2>
+              <p class="mt-2 text-sm text-court-200/65 md:text-xs">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right md:px-3 md:py-2">
+              <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">1st Server</p>
+              <p class="mt-1 text-base font-semibold text-white md:text-sm">${escapeHtml(playerName(match, serveOrder[0] ?? 0))}</p>
+            </div>
+          </div>
+          <div class="mt-4 grid gap-4 md:grid-cols-2">
+            <div class="rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5">
+              <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Set 1 Serve Order</p>
+              <p class="mt-3 text-sm text-court-100">${serveOrder.map((playerIndex, orderIndex) => `${orderIndex + 1}. ${playerName(match, playerIndex)}`).join(" → ")}</p>
+            </div>
+            <div class="rounded-[1.75rem] border border-white/10 bg-court-950/70 p-5">
+              <p class="text-xs uppercase tracking-[0.25em] text-court-300/60">Receive Formation</p>
+              <p class="mt-3 text-sm text-court-100">Team A: Deuce ${escapeHtml(playerName(match, receiveFormation.teamA?.deuce ?? 0))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamA?.ad ?? 1))}</p>
+              <p class="mt-2 text-sm text-court-100">Team B: Deuce ${escapeHtml(playerName(match, receiveFormation.teamB?.deuce ?? 2))} · Ad ${escapeHtml(playerName(match, receiveFormation.teamB?.ad ?? 3))}</p>
+            </div>
+          </div>
+          <div class="mt-4 rounded-2xl border border-court-300/30 bg-court-300/10 px-4 py-4 text-sm text-court-100">
+            Doubles scoring coming soon. Match setup saved.
+          </div>
+        </section>
+        <section class="rounded-[2rem] border border-white/10 bg-court-900/80 p-5">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Export</p>
+              <p class="mt-2 text-sm text-court-200/65">Download or share the current match.</p>
+            </div>
+            ${state.exportMessage ? `<span class="text-xs text-court-300">${escapeHtml(state.exportMessage)}</span>` : ""}
+          </div>
+          <div class="mt-4 grid gap-3">
+            <button data-action="export" data-kind="json" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white">Export JSON</button>
+            <button data-action="export" data-kind="csv" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white">Export CSV</button>
+            <button data-action="export" data-kind="share" class="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-left text-sm font-medium text-white ${state.shareSupported ? "" : "opacity-60"}">Share</button>
+          </div>
+        </section>
+      </section>
+    `;
+  }
   const visibleSetIndexes = [0, 1];
   if (computed.setsWon[0] === 1 && computed.setsWon[1] === 1) {
     visibleSetIndexes.push(2);
@@ -2367,7 +2827,7 @@ function renderLive(view) {
           <div class="flex items-start justify-between gap-4">
             <div>
               <p class="text-xs uppercase tracking-[0.3em] text-court-300/70">Live Match</p>
-              <h2 class="mt-2 text-2xl font-bold text-white md:text-xl">${escapeHtml(match.playerA)} <span class="text-court-300/60">vs</span> ${escapeHtml(match.playerB)}</h2>
+              <h2 class="mt-2 text-2xl font-bold text-white md:text-xl">${escapeHtml(sideName(match, 0))} <span class="text-court-300/60">vs</span> ${escapeHtml(sideName(match, 1))}</h2>
               <p class="mt-2 text-sm text-court-200/65 md:text-xs">${formatDate(match.date)} · ${MATCH_FORMAT_LABEL}</p>
             </div>
             <div class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right md:px-3 md:py-2">
@@ -2382,12 +2842,12 @@ function renderLive(view) {
               <div>
                 <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center">
                   <div>
-                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">${escapeHtml(match.playerA)}</p>
+                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">${escapeHtml(sideName(match, 0))}</p>
                     <p class="mt-3 font-mono text-5xl font-semibold text-white md:mt-2 md:text-4xl">${computed.liveScoreDisplay[0]}</p>
                   </div>
                   <span class="text-court-300/30">:</span>
                   <div>
-                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">${escapeHtml(match.playerB)}</p>
+                    <p class="text-sm uppercase tracking-[0.22em] text-court-300/60 md:text-xs">${escapeHtml(sideName(match, 1))}</p>
                     <p class="mt-3 font-mono text-5xl font-semibold text-white md:mt-2 md:text-4xl">${computed.liveScoreDisplay[1]}</p>
                   </div>
                 </div>
@@ -2559,7 +3019,7 @@ function renderHistory(view) {
 }
 
 function renderStatsTable(match, stats) {
-  const players = [match.playerA, match.playerB];
+  const players = [sideName(match, 0), sideName(match, 1)];
   const rows = [
     ["Serve", "", ""],
     ["1st Serve %", formatPercent(stats[0].firstServeIn, stats[0].firstServeAttempts), formatPercent(stats[1].firstServeIn, stats[1].firstServeAttempts)],
@@ -2697,7 +3157,7 @@ function renderMatches() {
                     }">
                       <div class="flex items-start justify-between gap-4">
                         <button data-action="select-match" data-id="${match.id}" class="text-left">
-                          <p class="font-semibold text-white">${escapeHtml(match.playerA)} vs ${escapeHtml(match.playerB)}</p>
+                          <p class="font-semibold text-white">${escapeHtml(matchTitle(match))}</p>
                           <p class="mt-1 text-sm text-court-200/60">${formatDate(match.updatedAt)}</p>
                         </button>
                         <div class="flex gap-2">
@@ -2842,7 +3302,7 @@ function render() {
         <header class="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p class="text-xs uppercase tracking-[0.35em] text-court-300/70">Tennis Tracker</p>
-            <h1 class="mt-2 text-2xl font-bold text-white">${hasMatch ? `${escapeHtml(view.match.playerA)} vs ${escapeHtml(view.match.playerB)}` : "Match Center"}</h1>
+            <h1 class="mt-2 text-2xl font-bold text-white">${hasMatch ? escapeHtml(matchTitle(view.match)) : "Match Center"}</h1>
           </div>
           <nav class="grid grid-cols-4 gap-2 rounded-[1.4rem] border border-white/10 bg-court-900/80 p-2">
             ${TABS.map((tab) => {
@@ -2897,6 +3357,27 @@ document.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (action === "setup-doubles-first-server") {
+    const firstServer = Number(target.dataset.value);
+    state.setup.doublesSetup.serveOrder = [firstServer, null, getPartnerIndex(firstServer), null];
+    render();
+    return;
+  }
+  if (action === "setup-doubles-second-server") {
+    const secondServer = Number(target.dataset.value);
+    const firstServer = state.setup.doublesSetup.serveOrder[0];
+    if (!Number.isInteger(firstServer) || getTeamIndex(firstServer) === getTeamIndex(secondServer)) {
+      return;
+    }
+    state.setup.doublesSetup.serveOrder = [
+      firstServer,
+      secondServer,
+      getPartnerIndex(firstServer),
+      getPartnerIndex(secondServer),
+    ];
+    render();
+    return;
+  }
   if (action === "setup-match-type") {
     state.setup.matchType = target.dataset.value === "doubles" ? "doubles" : "singles";
     render();
@@ -2904,6 +3385,23 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "setup-scoring-format") {
     state.setup.scoringFormat = normalizeScoringFormat(target.dataset.value);
+    render();
+    return;
+  }
+  if (action === "setup-doubles-scoring-format") {
+    state.setup.doublesSetup.scoringFormat = normalizeScoringFormat(target.dataset.value);
+    render();
+    return;
+  }
+  if (action === "setup-doubles-formation") {
+    const teamKey = target.dataset.team;
+    if (teamKey !== "teamA" && teamKey !== "teamB") {
+      return;
+    }
+    const baseIndex = teamKey === "teamA" ? 0 : 2;
+    state.setup.doublesSetup.receiveFormation[teamKey] = target.dataset.value === "second"
+      ? { deuce: baseIndex + 1, ad: baseIndex }
+      : { deuce: baseIndex, ad: baseIndex + 1 };
     render();
     return;
   }
@@ -3067,6 +3565,10 @@ document.addEventListener("input", (event) => {
   const action = target.dataset.action;
   if (action === "setup-input") {
     state.setup[target.dataset.key] = target.value;
+    return;
+  }
+  if (action === "setup-doubles-input") {
+    state.setup.doublesSetup[target.dataset.team][target.dataset.player] = target.value;
   }
 });
 
