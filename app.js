@@ -105,7 +105,6 @@ function createEmptyDraft() {
     flagged: false,
     excludeFromStats: false,
     netApproachStates: createEmptyTriStates(),
-    returnWinnerStates: createEmptyTriStates(),
   };
 }
 
@@ -120,7 +119,6 @@ function createEmptyDoublesDraft() {
     precedingShotType: "uncertain",
     rallyLength: "uncertain",
     netPositions: createEmptyQuadStates(),
-    returnWinnerPlayer: null,
     flagged: false,
     excludeFromStats: false,
   };
@@ -1105,7 +1103,6 @@ function computeDoublesMatch(match) {
       : createDefaultDoublesNetPositions(server, receiver);
     const resultShotPlayer = normalizedPoint.resultShotPlayer;
     const precedingShotPlayer = normalizedPoint.precedingShotPlayer;
-    const returnWinnerPlayer = normalizedPoint.returnWinnerPlayer;
     const { outcome, resultShotType, precedingShotType, rallyLength } = normalizedPoint;
     const setBuckets = ensureSetBucket(statsBySet, currentSet.index);
     const flagged = normalizedPoint.flagged;
@@ -1199,8 +1196,8 @@ function computeDoublesMatch(match) {
           }
         });
 
-        if (returnWinnerPlayer !== null) {
-          bucketGroup[getTeamIndex(returnWinnerPlayer)].returnWinners += 1;
+        if (precedingShotType === "serve" && outcome === "winner") {
+          bucketGroup[winner].returnWinners += 1;
         }
 
         if (rallyLength === "short") {
@@ -1259,7 +1256,6 @@ function computeDoublesMatch(match) {
       resultShotPlayer,
       precedingShotPlayer,
       netPositions: resolvedNetPositions,
-      returnWinnerPlayer,
       flagged,
       excludeFromStats,
       rallyLength,
@@ -1592,10 +1588,11 @@ function computeMatch(match) {
               bucketGroup[playerIndex].netPointsWon += 1;
             }
           }
-          if (returnWinnerStates[playerIndex] === 1) {
-            bucketGroup[playerIndex].returnWinners += 1;
-          }
         });
+
+        if (precedingShotType === "serve" && outcome === "winner") {
+          bucketGroup[winner].returnWinners += 1;
+        }
 
         if (rallyLength === "short") {
           bucketGroup[0].shortRallyPointsPlayed += 1;
@@ -3232,7 +3229,6 @@ async function addPoint() {
       netPositions: sanitizeQuadStates(draft.netPositions).some((value) => value !== null)
         ? sanitizeQuadStates(draft.netPositions)
         : createDefaultDoublesNetPositions(server, receiver),
-      returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(draft.returnWinnerPlayer),
       flagged: Boolean(draft.flagged),
       excludeFromStats: Boolean(draft.excludeFromStats),
       timestamp: new Date().toISOString(),
@@ -3268,7 +3264,6 @@ async function addPoint() {
     flagged: Boolean(draft.flagged),
     excludeFromStats: Boolean(draft.excludeFromStats),
     netApproachStates: sanitizeTriStates(draft.netApproachStates),
-    returnWinnerStates: sanitizeTriStates(draft.returnWinnerStates),
     timestamp: new Date().toISOString(),
   });
   await saveMatch(view.match);
@@ -3323,7 +3318,6 @@ async function savePointEdit() {
       netPositions: sanitizeQuadStates(draft.netPositions).some((value) => value !== null)
         ? sanitizeQuadStates(draft.netPositions)
         : createDefaultDoublesNetPositions(context.server, context.receiver),
-      returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(draft.returnWinnerPlayer),
       flagged: Boolean(draft.flagged),
       excludeFromStats: Boolean(draft.excludeFromStats),
     };
@@ -3355,7 +3349,6 @@ async function savePointEdit() {
     flagged: Boolean(draft.flagged),
     excludeFromStats: Boolean(draft.excludeFromStats),
     netApproachStates: sanitizeTriStates(draft.netApproachStates),
-    returnWinnerStates: sanitizeTriStates(draft.returnWinnerStates),
   };
   await saveMatch(view.match);
   resetDrafts();
@@ -3414,7 +3407,6 @@ function openEditor(pointId) {
       precedingShotType: normalizeShotType(point.precedingShotType ?? point.forcingShotType),
       rallyLength: normalizeRallyLength(point.rallyLength),
       netPositions: sanitizeQuadStates(point.netPositions ?? derivedPoint.netPositions),
-      returnWinnerPlayer: normalizeOptionalDoublesPlayerIndex(point.returnWinnerPlayer ?? derivedPoint.returnWinnerPlayer),
       flagged: normalizeFlagged(point.flagged),
       excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
     };
@@ -3431,7 +3423,6 @@ function openEditor(pointId) {
     flagged: normalizeFlagged(point.flagged),
     excludeFromStats: normalizeExcludeFromStats(point.excludeFromStats),
     netApproachStates: sanitizeTriStates(derivedPoint.netApproachStates),
-    returnWinnerStates: sanitizeTriStates(derivedPoint.returnWinnerStates),
   };
   render();
 }
@@ -3754,13 +3745,6 @@ function renderDoublesPointComposer(match, computed, draft, prefix, context = nu
           ], draft.resultShotType, `${prefix}-result-shot`, "grid-cols-3 sm:grid-cols-7")}
           ${renderChoiceGrid("Rally Length", RALLY_LENGTH_OPTIONS.map((option) => ({ ...option, muted: option.value === "uncertain" })), draft.rallyLength, `${prefix}-rally`, "grid-cols-3")}
           ${renderDoublesNetPositionSection(prefix, match, resolvedNetPositions)}
-          ${renderDoublesPlayerChoiceRow(
-            prefix,
-            "doubles-return-winner",
-            `Return Winner (${getTeamName(match, getTeamIndex(receiver))})`,
-            [...getDoublesTeamOptions(match, getTeamIndex(receiver)), { value: "uncertain", label: "Unc" }],
-            draft.returnWinnerPlayer === null ? "uncertain" : draft.returnWinnerPlayer
-          )}
           <div class="grid gap-3 sm:grid-cols-2">
             ${renderBooleanToggle(prefix, "flagged", "Flag", draft.flagged)}
             ${renderBooleanToggle(prefix, "excludeFromStats", "Exclude from Stats", draft.excludeFromStats)}
@@ -3849,7 +3833,6 @@ function renderPointComposer(match, computed, draft, prefix, context = null) {
             <p class="text-sm font-semibold text-white">Flags</p>
             <div class="mt-4 space-y-4">
               ${renderPlayerToggleSection(prefix, "netApproachStates", "Net Approach", match, draft.netApproachStates)}
-              ${renderPlayerToggleSection(prefix, "returnWinnerStates", "Return Winner", match, draft.returnWinnerStates)}
               <div class="grid gap-3 sm:grid-cols-2">
                 ${renderBooleanToggle(prefix, "flagged", "Flag", draft.flagged)}
                 ${renderBooleanToggle(prefix, "excludeFromStats", "Exclude from Stats", draft.excludeFromStats)}
@@ -4753,8 +4736,8 @@ function computeDoublesIndividualStats(match, computed, setFilter = "overall") {
       }
     }
 
-    if (entry.returnWinnerPlayer !== null && players[entry.returnWinnerPlayer]) {
-      players[entry.returnWinnerPlayer].returnWinners += 1;
+    if (entry.precedingShotType === "serve" && entry.outcome === "winner" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+      players[entry.resultShotPlayer].returnWinners += 1;
     }
 
     if (entry.outcome === "winner" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
@@ -5535,10 +5518,6 @@ document.addEventListener("click", async (event) => {
     updateDoublesDraftPlayer("draft", "precedingShotPlayer", target.dataset.value);
     return;
   }
-  if (action === "draft-doubles-return-winner") {
-    updateDoublesDraftPlayer("draft", "returnWinnerPlayer", target.dataset.value);
-    return;
-  }
   if (action === "draft-doubles-net") {
     updateDoublesNetPosition("draft", Number(target.dataset.player), target.dataset.value);
     return;
@@ -5614,10 +5593,6 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "edit-doubles-preceding-player") {
     updateDoublesDraftPlayer("edit", "precedingShotPlayer", target.dataset.value);
-    return;
-  }
-  if (action === "edit-doubles-return-winner") {
-    updateDoublesDraftPlayer("edit", "returnWinnerPlayer", target.dataset.value);
     return;
   }
   if (action === "edit-doubles-net") {
