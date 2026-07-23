@@ -148,6 +148,7 @@ function createStatsBucket() {
   return {
     servicePoints: 0,
     returnPoints: 0,
+    returnPointsWon: 0,
     firstServeAttempts: 0,
     firstServeIn: 0,
     secondServeAttempts: 0,
@@ -199,6 +200,7 @@ function createStatsBucket() {
     forcedErrors: 0,
     netPointsPlayed: 0,
     netPointsWon: 0,
+    returnPointsWon: 0,
     returnWinners: 0,
     breakPointsOpportunities: 0,
     breakPointsConverted: 0,
@@ -222,16 +224,31 @@ function createDoublesIndividualStatsBucket() {
     secondServePointsWon: 0,
     aces: 0,
     doubleFaults: 0,
+    servicePoints: 0,
     returnPoints: 0,
     returnPointsWon: 0,
     returnWinners: 0,
     winnersHit: 0,
+    winnersBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0, serve: 0 },
     unforcedErrors: 0,
+    unforcedErrorsBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0, serve: 0 },
     forcingShots: 0,
+    forcingShotsBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0, serve: 0 },
+    forcedErrorsReceived: 0,
     netPointsPlayed: 0,
     netPointsWon: 0,
     backPointsPlayed: 0,
     backPointsWon: 0,
+    shortRallyPointsPlayed: 0,
+    shortRallyPointsWon: 0,
+    longRallyPointsPlayed: 0,
+    longRallyPointsWon: 0,
+    totalPointsPlayed: 0,
+    totalPointsWon: 0,
+    breakPointsOpportunities: 0,
+    breakPointsConverted: 0,
+    breakPointsFaced: 0,
+    breakPointsSaved: 0,
   };
 }
 
@@ -613,6 +630,7 @@ function alignServeOrderForGame(setConfig, gameIndex, server) {
   const rotated = serveOrder.map((_, index) => serveOrder[(index + shift) % serveOrder.length]);
   return {
     serveOrder: rotated,
+    firstReceiver: normalized.firstReceiver,
     receiveFormation: normalizeReceiveFormation(normalized.receiveFormation),
   };
 }
@@ -1096,6 +1114,9 @@ function computeDoublesMatch(match) {
         bucketGroup[winner].totalPointsWon += 1;
         bucketGroup[serverTeam].servicePoints += 1;
         bucketGroup[receiverTeam].returnPoints += 1;
+        if (winner === receiverTeam) {
+          bucketGroup[receiverTeam].returnPointsWon += 1;
+        }
         bucketGroup[serverTeam].firstServeAttempts += 1;
 
         if (normalizedPoint.serveResult === "first_in" || normalizedPoint.serveResult === "ace") {
@@ -1258,7 +1279,7 @@ function computeDoublesMatch(match) {
     : getDoublesReceiver(match, currentSet.index, liveServer, 0, currentSetConfig);
   const isComplete = matchWinner !== null;
   const completedGamesInLiveSet = currentSet.gamesWon[0] + currentSet.gamesWon[1];
-  const needsNewSetConfig = !isComplete && currentSet.index > 0 && currentSetConfigMissing;
+  const needsNewSetConfig = !isComplete && currentSet.index > 0 && currentSetConfigMissing && currentSetConfig.serveOrder.length < 4;
   const needsSecondServer = !isComplete && !needsNewSetConfig && currentSetConfig.serveOrder.length < 4 && completedGamesInLiveSet > 0;
 
   return {
@@ -1478,6 +1499,9 @@ function computeMatch(match) {
         bucketGroup[winner].totalPointsWon += 1;
         bucketGroup[server].servicePoints += 1;
         bucketGroup[receiver].returnPoints += 1;
+        if (winner === receiver) {
+          bucketGroup[receiver].returnPointsWon += 1;
+        }
         bucketGroup[server].firstServeAttempts += 1;
 
         if (normalizedPoint.serveResult === "first_in" || normalizedPoint.serveResult === "ace") {
@@ -1807,11 +1831,29 @@ async function applyDoublesNewSetConfig() {
     render();
     return;
   }
-  await saveDoublesSetConfig(
-    view.match,
-    setIndex,
-    buildDeferredDoublesSetConfig(normalizedFirstServer, normalizedFirstReceiver)
-  );
+  let config;
+  if (setIndex > 0) {
+    // For Set 2+, auto-derive full serve order from previous set's pattern
+    const prevConfig = getDoublesSetConfig(view.match, setIndex - 1);
+    const prevOrder = normalizeDoublesServeOrder(prevConfig.serveOrder);
+    if (prevOrder.length === 4 && prevOrder.includes(normalizedFirstServer)) {
+      // Rotate previous order so normalizedFirstServer is in position 0
+      const startIdx = prevOrder.indexOf(normalizedFirstServer);
+      const rotated = prevOrder.map((_, i) => prevOrder[(i + startIdx) % 4]);
+      config = {
+        serveOrder: rotated,
+        firstReceiver: normalizedFirstReceiver,
+        receiveFormation: deriveReceiveFormationFromFirstPattern(normalizedFirstServer, normalizedFirstReceiver),
+      };
+    } else {
+      // Fallback: build full order from firstServer/firstReceiver using partner logic
+      const secondServer = getPartnerIndex(normalizedFirstReceiver);
+      config = buildDeferredDoublesSetConfig(normalizedFirstServer, normalizedFirstReceiver, secondServer);
+    }
+  } else {
+    config = buildDeferredDoublesSetConfig(normalizedFirstServer, normalizedFirstReceiver);
+  }
+  await saveDoublesSetConfig(view.match, setIndex, config);
   closeDoublesPrompt();
   state.error = "";
   render();
@@ -2903,12 +2945,20 @@ function validateDoublesPointDraft(draft, match, computed, context = null) {
 }
 
 function getCheckpointDraftFromComputed(computed) {
+  const isTiebreak = computed.liveGameIsTiebreak || computed.liveSetIsMatchTiebreak;
+  let gameScore;
+  if (isTiebreak) {
+    gameScore = computed.liveGamePoints.map(String);
+  } else {
+    const display = computed.liveScoreDisplay.slice(0, 2);
+    gameScore = display.map((label) => (label === "Deuce" ? "40" : label === "Deciding Pt" ? "40" : label));
+  }
   return {
     setScore: computed.liveSetGames.map(String),
-    gameScore: computed.liveGamePoints.map(String),
+    gameScore,
     server: String(computed.liveServer),
     receiver: computed.liveReceiver != null ? String(computed.liveReceiver) : null,
-    isTiebreak: computed.liveGameIsTiebreak || computed.liveSetIsMatchTiebreak,
+    isTiebreak,
   };
 }
 
@@ -4580,6 +4630,7 @@ function renderStatsTable(match, stats) {
     ["Net & Break", "", ""],
     ["Net Points Won / Played", formatFraction(stats[0].netPointsWon, stats[0].netPointsPlayed), formatFraction(stats[1].netPointsWon, stats[1].netPointsPlayed)],
     ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
+    ["Return Point Win %", formatPercent(stats[0].returnPointsWon, stats[0].returnPoints), formatPercent(stats[1].returnPointsWon, stats[1].returnPoints)],
     ["Break Points Converted", formatFraction(stats[0].breakPointsConverted, stats[0].breakPointsOpportunities), formatFraction(stats[1].breakPointsConverted, stats[1].breakPointsOpportunities)],
     ["Break Points Saved", formatFraction(stats[0].breakPointsSaved, stats[0].breakPointsFaced), formatFraction(stats[1].breakPointsSaved, stats[1].breakPointsFaced)],
   ];
@@ -4630,6 +4681,7 @@ function computeDoublesIndividualStats(match, computed, setFilter = "overall") {
     const receiverTeam = getTeamIndex(receiver);
 
     if (Number.isInteger(server) && players[server]) {
+      players[server].servicePoints += 1;
       players[server].firstServeAttempts += 1;
       if (entry.serveResult === "first_in" || entry.serveResult === "ace") {
         players[server].firstServeIn += 1;
@@ -4667,12 +4719,55 @@ function computeDoublesIndividualStats(match, computed, setFilter = "overall") {
 
     if (entry.outcome === "winner" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
       players[entry.resultShotPlayer].winnersHit += 1;
+      if (entry.resultShotType && entry.resultShotType !== "uncertain") {
+        players[entry.resultShotPlayer].winnersBreakdown[entry.resultShotType] += 1;
+      }
     }
     if (entry.outcome === "unforced_error" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
       players[entry.resultShotPlayer].unforcedErrors += 1;
+      if (entry.resultShotType && entry.resultShotType !== "uncertain") {
+        players[entry.resultShotPlayer].unforcedErrorsBreakdown[entry.resultShotType] += 1;
+      }
     }
     if (entry.outcome === "forced_error" && entry.precedingShotPlayer !== null && players[entry.precedingShotPlayer]) {
       players[entry.precedingShotPlayer].forcingShots += 1;
+      if (entry.precedingShotType && entry.precedingShotType !== "uncertain") {
+        players[entry.precedingShotPlayer].forcingShotsBreakdown[entry.precedingShotType] += 1;
+      }
+    }
+    if (entry.outcome === "forced_error" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+      players[entry.resultShotPlayer].forcedErrorsReceived += 1;
+    }
+
+    // Rally length stats - attribute to all 4 players based on team win
+    const rallyLength = normalizeRallyLength(entry.rallyLength);
+    [0, 1, 2, 3].forEach((playerIndex) => {
+      if (!players[playerIndex]) return;
+      const playerTeam = getTeamIndex(playerIndex);
+      const wonPoint = winningTeam === playerTeam;
+      players[playerIndex].totalPointsPlayed += 1;
+      if (wonPoint) {
+        players[playerIndex].totalPointsWon += 1;
+      }
+      if (rallyLength === "short") {
+        players[playerIndex].shortRallyPointsPlayed += 1;
+        if (wonPoint) players[playerIndex].shortRallyPointsWon += 1;
+      }
+      if (rallyLength === "long") {
+        players[playerIndex].longRallyPointsPlayed += 1;
+        if (wonPoint) players[playerIndex].longRallyPointsWon += 1;
+      }
+    });
+
+    // Break points - attribute to server and receiver
+    if (entry.isBreakPoint && Number.isInteger(server) && Number.isInteger(receiver)) {
+      players[server].breakPointsFaced += 1;
+      players[receiver].breakPointsOpportunities += 1;
+      if (winningTeam === receiverTeam) {
+        players[receiver].breakPointsConverted += 1;
+      } else {
+        players[server].breakPointsSaved += 1;
+      }
     }
 
     const netPositions = sanitizeQuadStates(entry.netPositions);
@@ -4750,12 +4845,21 @@ function renderDoublesIndividualStatsCard(match, playerIndex, stats) {
         ${renderMetric("Return Pts Won %", formatPercent(stats.returnPointsWon, stats.returnPoints), formatFraction(stats.returnPointsWon, stats.returnPoints))}
         ${renderMetric("Return Winners", String(stats.returnWinners))}
         ${renderMetric("Winners Hit", String(stats.winnersHit))}
+        ${renderMetric("Winners FH/BH/V/OH/D/S", shortShotLine(stats.winnersBreakdown))}
         ${renderMetric("UE Made", String(stats.unforcedErrors))}
+        ${renderMetric("UE FH/BH/V/OH/D/S", shortShotLine(stats.unforcedErrorsBreakdown))}
+        ${renderMetric("Forced Errors Received", String(stats.forcedErrorsReceived))}
         ${renderMetric("Forcing Shots", String(stats.forcingShots))}
+        ${renderMetric("Forcing FH/BH/V/OH/D/S", shortShotLine(stats.forcingShotsBreakdown))}
+        ${renderMetric("Total Points Won", `${stats.totalPointsWon}`, formatFraction(stats.totalPointsWon, stats.totalPointsPlayed))}
+        ${renderMetric("Short Rally Win %", formatPercent(stats.shortRallyPointsWon, stats.shortRallyPointsPlayed), formatFraction(stats.shortRallyPointsWon, stats.shortRallyPointsPlayed))}
+        ${renderMetric("Long Rally Win %", formatPercent(stats.longRallyPointsWon, stats.longRallyPointsPlayed), formatFraction(stats.longRallyPointsWon, stats.longRallyPointsPlayed))}
         ${renderMetric("Net Win %", formatPercent(stats.netPointsWon, stats.netPointsPlayed), formatFraction(stats.netPointsWon, stats.netPointsPlayed))}
         ${renderMetric("Net Points", String(stats.netPointsPlayed))}
         ${renderMetric("Back Win %", formatPercent(stats.backPointsWon, stats.backPointsPlayed), formatFraction(stats.backPointsWon, stats.backPointsPlayed))}
         ${renderMetric("Back Points", String(stats.backPointsPlayed))}
+        ${renderMetric("Break Pts Converted", formatFraction(stats.breakPointsConverted, stats.breakPointsOpportunities))}
+        ${renderMetric("Break Pts Saved", formatFraction(stats.breakPointsSaved, stats.breakPointsFaced))}
       </div>
     </article>
   `;
