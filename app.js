@@ -211,6 +211,9 @@ function createStatsBucket() {
     longRallyPointsPlayed: 0,
     longRallyPointsWon: 0,
     totalPointsWon: 0,
+    returnWinnersBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0 },
+    returnUnforcedErrorsBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0 },
+    returnForcedErrors: 0,
   };
 }
 
@@ -249,6 +252,9 @@ function createDoublesIndividualStatsBucket() {
     breakPointsConverted: 0,
     breakPointsFaced: 0,
     breakPointsSaved: 0,
+    returnWinnersBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0 },
+    returnUnforcedErrorsBreakdown: { forehand: 0, backhand: 0, volley: 0, overhead: 0, drop_shot: 0 },
+    returnForcedErrors: 0,
   };
 }
 
@@ -1160,6 +1166,19 @@ function computeDoublesMatch(match) {
           }
         }
 
+        // Return-specific breakdown (shot is a return if preceding shot was a serve)
+        if (precedingShotType === "serve") {
+          if (outcome === "winner" && resultShotType !== "uncertain" && resultShotType !== "serve") {
+            bucketGroup[winner].returnWinnersBreakdown[resultShotType] += 1;
+          }
+          if (outcome === "unforced_error" && resultShotType !== "uncertain" && resultShotType !== "serve") {
+            bucketGroup[loser].returnUnforcedErrorsBreakdown[resultShotType] += 1;
+          }
+          if (outcome === "forced_error") {
+            bucketGroup[loser].returnForcedErrors += 1;
+          }
+        }
+
         if (outcome !== "uncertain" && precedingShotType !== "uncertain") {
           if (outcome === "winner") {
             bucketGroup[winner].winnersAfterOpponentShot[precedingShotType] += 1;
@@ -1542,6 +1561,19 @@ function computeMatch(match) {
           bucketGroup[loser].forcedErrors += 1;
           if (precedingShotType !== "uncertain" && precedingShotPlayer !== null) {
             bucketGroup[precedingShotPlayer].forcingShots[precedingShotType] += 1;
+          }
+        }
+
+        // Return-specific breakdown (shot is a return if preceding shot was a serve)
+        if (precedingShotType === "serve") {
+          if (outcome === "winner" && resultShotType !== "uncertain" && resultShotType !== "serve") {
+            bucketGroup[winner].returnWinnersBreakdown[resultShotType] += 1;
+          }
+          if (outcome === "unforced_error" && resultShotType !== "uncertain" && resultShotType !== "serve") {
+            bucketGroup[loser].returnUnforcedErrorsBreakdown[resultShotType] += 1;
+          }
+          if (outcome === "forced_error") {
+            bucketGroup[loser].returnForcedErrors += 1;
           }
         }
 
@@ -4631,6 +4663,10 @@ function renderStatsTable(match, stats) {
     ["Net Points Won / Played", formatFraction(stats[0].netPointsWon, stats[0].netPointsPlayed), formatFraction(stats[1].netPointsWon, stats[1].netPointsPlayed)],
     ["Return Winners", stats[0].returnWinners, stats[1].returnWinners],
     ["Return Point Win %", formatPercent(stats[0].returnPointsWon, stats[0].returnPoints), formatPercent(stats[1].returnPointsWon, stats[1].returnPoints)],
+    ["Return Analysis", "", ""],
+    ["Return Winners FH/BH/V/OH/D", shortReturnLine(stats[0].returnWinnersBreakdown), shortReturnLine(stats[1].returnWinnersBreakdown)],
+    ["Return UE FH/BH/V/OH/D", shortReturnLine(stats[0].returnUnforcedErrorsBreakdown), shortReturnLine(stats[1].returnUnforcedErrorsBreakdown)],
+    ["Return Forced Errors", stats[0].returnForcedErrors, stats[1].returnForcedErrors],
     ["Break Points Converted", formatFraction(stats[0].breakPointsConverted, stats[0].breakPointsOpportunities), formatFraction(stats[1].breakPointsConverted, stats[1].breakPointsOpportunities)],
     ["Break Points Saved", formatFraction(stats[0].breakPointsSaved, stats[0].breakPointsFaced), formatFraction(stats[1].breakPointsSaved, stats[1].breakPointsFaced)],
   ];
@@ -4656,6 +4692,10 @@ function renderStatsTable(match, stats) {
 
 function shortShotLine(bucket) {
   return `${bucket.forehand}/${bucket.backhand}/${bucket.volley}/${bucket.overhead}/${bucket.drop_shot}/${bucket.serve}`;
+}
+
+function shortReturnLine(bucket) {
+  return `${bucket.forehand}/${bucket.backhand}/${bucket.volley}/${bucket.overhead}/${bucket.drop_shot}`;
 }
 
 function formatCountPercent(count, total) {
@@ -4737,6 +4777,23 @@ function computeDoublesIndividualStats(match, computed, setFilter = "overall") {
     }
     if (entry.outcome === "forced_error" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
       players[entry.resultShotPlayer].forcedErrorsReceived += 1;
+    }
+
+    // Return-specific breakdown (preceding shot was a serve = this is a return)
+    if (entry.precedingShotType === "serve") {
+      if (entry.outcome === "winner" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+        if (entry.resultShotType && entry.resultShotType !== "uncertain" && entry.resultShotType !== "serve") {
+          players[entry.resultShotPlayer].returnWinnersBreakdown[entry.resultShotType] += 1;
+        }
+      }
+      if (entry.outcome === "unforced_error" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+        if (entry.resultShotType && entry.resultShotType !== "uncertain" && entry.resultShotType !== "serve") {
+          players[entry.resultShotPlayer].returnUnforcedErrorsBreakdown[entry.resultShotType] += 1;
+        }
+      }
+      if (entry.outcome === "forced_error" && entry.resultShotPlayer !== null && players[entry.resultShotPlayer]) {
+        players[entry.resultShotPlayer].returnForcedErrors += 1;
+      }
     }
 
     // Rally length stats - attribute to all 4 players based on team win
@@ -4844,6 +4901,9 @@ function renderDoublesIndividualStatsCard(match, playerIndex, stats) {
         ${renderMetric("Double Faults", String(stats.doubleFaults))}
         ${renderMetric("Return Pts Won %", formatPercent(stats.returnPointsWon, stats.returnPoints), formatFraction(stats.returnPointsWon, stats.returnPoints))}
         ${renderMetric("Return Winners", String(stats.returnWinners))}
+        ${renderMetric("Return Winners FH/BH/V/OH/D", shortReturnLine(stats.returnWinnersBreakdown))}
+        ${renderMetric("Return UE FH/BH/V/OH/D", shortReturnLine(stats.returnUnforcedErrorsBreakdown))}
+        ${renderMetric("Return Forced Errors", String(stats.returnForcedErrors))}
         ${renderMetric("Winners Hit", String(stats.winnersHit))}
         ${renderMetric("Winners FH/BH/V/OH/D/S", shortShotLine(stats.winnersBreakdown))}
         ${renderMetric("UE Made", String(stats.unforcedErrors))}
